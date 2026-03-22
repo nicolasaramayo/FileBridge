@@ -2,8 +2,9 @@ namespace FileBridge.Infrastructure.Persistence.Repositories;
 
 using FileBridge.Domain.Entities;
 using FileBridge.Domain.Enums;
+using DomainIDeviceRepository = FileBridge.Domain.Interfaces.IDeviceRepository;
 
-public class DeviceRepository : IDeviceRepository
+public class DeviceRepository : DomainIDeviceRepository
 {
     private readonly FileBridgeDbContext _context;
 
@@ -34,19 +35,23 @@ public class DeviceRepository : IDeviceRepository
         return record != null ? MapToDomain(record) : null;
     }
 
-    public async Task AddAsync(Device device, CancellationToken ct = default)
+    public Task<int> SaveAsync(Device device, CancellationToken ct = default) => AddAsync(device, ct);
+
+    public async Task<int> AddAsync(Device device, CancellationToken ct = default)
     {
         var record = MapToRecord(device);
         await _context.InsertAsync(record);
+        return 1;
     }
 
-    public async Task UpdateAsync(Device device, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Device device, CancellationToken ct = default)
     {
         var record = MapToRecord(device);
         await _context.UpdateAsync(record);
+        return 1;
     }
 
-    public async Task UpdateLastSeenAsync(string id, CancellationToken ct = default)
+    public async Task<int> UpdateLastSeenAsync(string id, CancellationToken ct = default)
     {
         var record = await _context.Devices
             .Where(d => d.Id == id)
@@ -57,9 +62,10 @@ public class DeviceRepository : IDeviceRepository
             record.LastSeenAt = DateTime.UtcNow;
             await _context.UpdateAsync(record);
         }
+        return 1;
     }
 
-    public async Task DeleteAsync(string id, CancellationToken ct = default)
+    public async Task<int> DeleteAsync(string id, CancellationToken ct = default)
     {
         var record = await _context.Devices
             .Where(d => d.Id == id)
@@ -68,6 +74,7 @@ public class DeviceRepository : IDeviceRepository
         {
             await _context.DeleteAsync(record);
         }
+        return 1;
     }
 
     private static Device MapToDomain(DeviceRecord record)

@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FileBridge.Domain\FileBridge.Domain.csproj" />
+    <ProjectReference Include="..\FileBridge.Application\FileBridge.Application.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -18,6 +19,11 @@
     <PackageReference Include="System.Formats.Asn1" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-android35.0'">
+    <PackageReference Include="Xamarin.AndroidX.Core" />
   </ItemGroup>
 
 </Project>
