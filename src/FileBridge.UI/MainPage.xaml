@@ -2,10 +2,6 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Class="FileBridge.UI.MainPage"
     xmlns:vm="clr-namespace:FileBridge.UI.ViewModels">
-    <ContentPage.BindingContext>
-        <vm:MainViewModel />
-    </ContentPage.BindingContext>
-    
     <VerticalStackLayout Padding="20" Spacing="20">
         <Label Text="FileBridge" FontSize="32" HorizontalOptions="Center" />
         <Label Text="Transfer files between your devices" HorizontalOptions="Center" />

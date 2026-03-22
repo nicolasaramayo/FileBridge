@@ -1,0 +1,85 @@
+<ContentPage
+    x:Class="FileBridge.UI.SettingsPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/2006/xaml"
+    xmlns:local="clr-namespace:FileBridge.UI"
+    xmlns:vm="clr-namespace:FileBridge.UI.ViewModels"
+    xmlns:conv="clr-namespace:FileBridge.UI.Converters"
+    Title="Settings">
+
+    <ScrollView>
+        <StackLayout Padding="20" Spacing="20">
+
+            <!-- Device Settings Section -->
+            <Label Text="Device Settings" FontSize="20" FontAttributes="Bold" />
+            
+            <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
+                <StackLayout Spacing="12">
+                    <StackLayout>
+                        <Label Text="Server Port" FontSize="14" Opacity="0.7" />
+                        <Entry Text="{Binding ServerPort}" Keyboard="Numeric" Placeholder="45678" />
+                    </StackLayout>
+                    
+                    <StackLayout Orientation="Horizontal">
+                        <Switch IsToggled="{Binding AutoDiscover}" />
+                        <Label Text="Auto-discover devices on startup" VerticalOptions="Center" />
+                    </StackLayout>
+                </StackLayout>
+            </Frame>
+
+            <!-- Security Section -->
+            <Label Text="Security" FontSize="20" FontAttributes="Bold" Margin="0,10,0,0" />
+            
+            <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
+                <StackLayout>
+                    <StackLayout Orientation="Horizontal">
+                        <Switch IsToggled="{Binding EncryptionEnabled}" />
+                        <StackLayout VerticalOptions="Center">
+                            <Label Text="Enable Encryption" FontSize="16" />
+                            <Label Text="Encrypt files during transfer (AES-256)" FontSize="12" Opacity="0.7" />
+                        </StackLayout>
+                    </StackLayout>
+                </StackLayout>
+            </Frame>
+
+            <!-- Transfer Settings -->
+            <Label Text="Transfer" FontSize="20" FontAttributes="Bold" Margin="0,10,0,0" />
+            
+            <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
+                <StackLayout Spacing="12">
+                    <StackLayout>
+                        <Label Text="Chunk Size" FontSize="14" Opacity="0.7" />
+                        <StackLayout Orientation="Horizontal" Spacing="10">
+                            <Label Text="{Binding DefaultChunkSize, StringFormat='{}{0} bytes'}" VerticalOptions="Center" />
+                            <Slider 
+                                Minimum="16384" 
+                                Maximum="262144" 
+                                Value="{Binding DefaultChunkSize}"
+                                HorizontalOptions="FillAndExpand" />
+                        </StackLayout>
+                        <Label Text="Larger chunks = faster transfers on fast networks" FontSize="11" Opacity="0.5" />
+                    </StackLayout>
+                </StackLayout>
+            </Frame>
+
+            <!-- Save Button -->
+            <Button Text="Save Settings" 
+                    Command="{Binding SaveSettingsCommand}"
+                    Margin="0,10,0,0" />
+
+            <!-- About Section -->
+            <Label Text="About" FontSize="20" FontAttributes="Bold" Margin="0,20,0,0" />
+            
+            <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
+                <StackLayout Spacing="8">
+                    <Label Text="FileBridge" FontSize="18" FontAttributes="Bold" />
+                    <Label Text="{Binding AppVersion, StringFormat='Version {0}'}" FontSize="14" Opacity="0.7" />
+                    <Label Text="Transfer files between devices securely over your local network." 
+                           FontSize="14" Opacity="0.7" 
+                           LineBreakMode="WordWrap" />
+                </StackLayout>
+            </Frame>
+
+        </StackLayout>
+    </ScrollView>
+</ContentPage>

@@ -2,11 +2,22 @@
 <Shell
     x:Class="FileBridge.UI.AppShell"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
-    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="clr-namespace:FileBridge.UI"
-    Shell.FlyoutBehavior="Disabled">
-    <ShellContent Title="Home" ContentTemplate="{DataTemplate local:MainPage}" Route="home" />
-    <ShellContent Title="Devices" Route="devices" />
-    <ShellContent Title="Transfers" Route="transfers" />
-    <ShellContent Title="Settings" Route="settings" />
+    FlyoutBehavior="Disabled">
+
+    <TabBar>
+        <Tab Title="Devices" Icon="devices.png">
+            <ShellContent Route="devices" ContentTemplate="{DataTemplate local:DeviceListPage}" />
+        </Tab>
+        <Tab Title="Files" Icon="folder.png">
+            <ShellContent Route="files" ContentTemplate="{DataTemplate local:FileBrowserPage}" />
+        </Tab>
+        <Tab Title="Transfers" Icon="transfer.png">
+            <ShellContent Route="transfers" ContentTemplate="{DataTemplate local:TransferPage}" />
+        </Tab>
+        <Tab Title="Settings" Icon="settings.png">
+            <ShellContent Route="settings" ContentTemplate="{DataTemplate local:SettingsPage}" />
+        </Tab>
+    </TabBar>
 </Shell>
