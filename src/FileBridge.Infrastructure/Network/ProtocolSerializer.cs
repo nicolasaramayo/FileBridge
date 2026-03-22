@@ -66,7 +66,6 @@ public sealed class ProtocolSerializer
             Version = version,
             Type = type,
             Flags = flags,
-            Length = length,
             Payload = payload
         };
     }
@@ -254,8 +253,8 @@ public sealed class ProtocolMessage
     public byte Version { get; set; } = ProtocolSerializer.ProtocolVersion;
     public MessageType Type { get; set; }
     public ushort Flags { get; set; }
-    public int Length { get; set; }
     public byte[] Payload { get; set; } = Array.Empty<byte>();
+    public int Length => Payload.Length;
 
     public bool IsEncrypted => (Flags & 0x01) != 0;
     public void SetEncrypted(bool value)

@@ -34,7 +34,7 @@ public class DeviceTests
         Assert.AreEqual("192.168.1.100", device.IpAddress);
         Assert.AreEqual(45678, device.Port);
         Assert.AreEqual(DeviceRole.PC, device.Role);
-        Assert.AreEqual(new byte[] { 1, 2, 3, 4 }, device.PublicKey);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4 }, device.PublicKey);
     }
     
     [TestMethod]

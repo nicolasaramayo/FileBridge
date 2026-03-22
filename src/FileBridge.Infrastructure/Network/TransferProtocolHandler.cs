@@ -82,8 +82,7 @@ public sealed class TransferProtocolHandler
             var response = new ProtocolMessage
             {
                 Type = MessageType.Handshake,
-                Payload = responsePayload,
-                Length = responsePayload.Length
+                Payload = responsePayload
             };
             await SendMessageAsync(client, response, ct);
         }
@@ -111,8 +110,7 @@ public sealed class TransferProtocolHandler
             var ackMsg = new ProtocolMessage
             {
                 Type = MessageType.Ack,
-                Payload = ackPayload,
-                Length = ackPayload.Length
+                Payload = ackPayload
             };
             await SendMessageAsync(client, ackMsg, ct);
         }
@@ -193,8 +191,7 @@ public sealed class TransferProtocolHandler
             var ackMsg = new ProtocolMessage
             {
                 Type = MessageType.Ack,
-                Payload = ackPayload,
-                Length = ackPayload.Length
+                Payload = ackPayload
             };
             await SendMessageAsync(client, ackMsg, ct);
         }

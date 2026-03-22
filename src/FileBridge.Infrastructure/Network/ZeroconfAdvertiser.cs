@@ -2,66 +2,79 @@ namespace FileBridge.Infrastructure.Network;
 
 using FileBridge.Domain.Entities;
 using FileBridge.Domain.Interfaces;
+using Makaretu.Dns;
+using Microsoft.Extensions.Logging;
 
 public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
 {
-    private const string ServiceType = "_filetransfer._tcp.local.";
+    private const string ServiceType = "_filetransfer._tcp"; 
     private const int BroadcastIntervalSeconds = 60;
 
     private CancellationTokenSource? _cts;
     private readonly ILogger? _logger;
-    private readonly string _deviceName;
-    private readonly int _port;
-    private readonly string _deviceId;
-    private readonly Dictionary<string, string> _properties;
+    private string? _deviceName;
+    private int _port;
+    private string? _deviceId;
+    private MulticastService? _mdns;
+    private ServiceDiscovery? _sd;
+    private ServiceProfile? _profile;
+
     private bool _disposed;
 
     public event EventHandler<Device>? OnDeviceFound;
     public event EventHandler<Device>? OnDeviceLost;
 
-    public ZeroconfAdvertiser(string deviceName, int port, string deviceId, ILogger? logger = null)
+    public ZeroconfAdvertiser(ILogger? logger = null)
     {
-        _deviceName = deviceName ?? throw new ArgumentNullException(nameof(deviceName));
-        _port = port;
-        _deviceId = deviceId ?? Guid.NewGuid().ToString();
         _logger = logger;
-        _properties = new Dictionary<string, string>
-        {
-            ["name"] = _deviceName,
-            ["port"] = _port.ToString(),
-            ["version"] = "1",
-            ["deviceId"] = _deviceId
-        };
     }
 
     public async Task StartDiscoveryAsync(CancellationToken ct = default)
     {
-        // Implements IDiscoveryService — start advertising as the primary use
-        await StartAdvertisingAsync(ct);
+        if (string.IsNullOrEmpty(_deviceName))
+        {
+            _logger?.LogWarning("StartDiscoveryAsync called before parameters were set. Advertising will not start.");
+            return;
+        }
+        await StartAdvertisingAsync(_deviceName, _port, _deviceId ?? Guid.NewGuid().ToString(), ct);
     }
 
-    public async Task StartAdvertisingAsync(CancellationToken ct = default)
+    public async Task StartAdvertisingAsync(string deviceName, int port, string deviceId, CancellationToken ct = default)
     {
+        _deviceName = deviceName;
+        _port = port;
+        _deviceId = deviceId;
         if (_disposed)
             throw new ObjectDisposedException(nameof(ZeroconfAdvertiser));
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _logger?.LogInformation(
-            "mDNS advertiser: Zeroconf.RegisterAsync for service '{Name}' on port {Port}",
-            _deviceName, _port);
+        
+        try
+        {
+            _mdns = new MulticastService();
+            _sd = new ServiceDiscovery(_mdns);
+            
+            // Name must be unique on network
+            string instanceName = $"{_deviceName}-{_deviceId}".Replace(" ", "-");
+            
+            _profile = new ServiceProfile(instanceName, ServiceType, (ushort)_port);
+            _profile.AddProperty("name", _deviceName);
+            _profile.AddProperty("port", _port.ToString());
+            _profile.AddProperty("version", "1");
+            _profile.AddProperty("deviceId", _deviceId);
 
-        // NOTE: The Zeroconf package (novotnyllc/Zeroconf v3.7.16) does not include
-        // built-in service advertisement APIs. The advertised service is registered
-        // via the platform's native mDNS stack:
-        //   - Windows: dns_sd.dll (Bonjour) via P/Invoke
-        //   - Android: NsdManager via Android binding
-        //
-        // For a working implementation, use one of these approaches:
-        // 1. Platform-specific partial classes that wrap the native APIs
-        // 2. A separate advertisement library (e.g., Makaretu.Dns on non-Apple platforms)
-        //
-        // For now, advertising is a stub. The Discovery service (ZeroconfDiscovery)
-        // is fully functional for device discovery.
+            _sd.Advertise(_profile);
+            _mdns.Start();
+
+            _logger?.LogInformation(
+                "mDNS advertiser: Makaretu.Dns started for service '{Name}' on port {Port}",
+                _deviceName, _port);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogInformation("Failed to start mDNS advertiser", ex.ToString());
+            throw;
+        }
 
         await Task.CompletedTask;
     }
@@ -76,7 +89,28 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
         _cts?.Cancel();
         _cts?.Dispose();
         _cts = null;
-        _logger?.LogInformation("mDNS advertiser stopped");
+
+        try
+        {
+            if (_sd != null && _profile != null)
+            {
+                _sd.Unadvertise(_profile);
+                _sd.Dispose();
+                _sd = null;
+            }
+            if (_mdns != null)
+            {
+                _mdns.Stop();
+                _mdns.Dispose();
+                _mdns = null;
+            }
+            _logger?.LogInformation("mDNS advertiser stopped");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Error while stopping mDNS advertiser");
+        }
+        
         await Task.CompletedTask;
     }
 
@@ -88,9 +122,7 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
-            return;
-
+        if (_disposed) return;
         _disposed = true;
         StopAdvertisingAsync().GetAwaiter().GetResult();
     }

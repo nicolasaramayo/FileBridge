@@ -30,7 +30,7 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
     private readonly Channel<(TransferJob Job, TransferProgressDto Progress)> _progressChannel;
     private readonly SemaphoreSlim _queueSemaphore = new(1, 1);
     private readonly Queue<TransferJob> _transferQueue = new();
-    private readonly Dictionary<string, TransferJob> _activeJobs = new();
+    private readonly ZeroconfAdvertiser _advertiser;
 
     public ChannelReader<(TransferJob Job, TransferProgressDto Progress)> ProgressChannel => _progressChannel.Reader;
 
@@ -39,10 +39,12 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
     public TransferBackgroundService(
         TransferOrchestrator orchestrator,
         TcpServer tcpServer,
+        ZeroconfAdvertiser advertiser,
         ILogger<TransferBackgroundService> logger)
     {
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
         _tcpServer = tcpServer ?? throw new ArgumentNullException(nameof(tcpServer));
+        _advertiser = advertiser ?? throw new ArgumentNullException(nameof(advertiser));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
         _progressChannel = Channel.CreateBounded<(TransferJob, TransferProgressDto)>(
@@ -160,9 +162,13 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Start the TCP server
         await _tcpServer.StartAsync(0, stoppingToken);
         _logger.LogInformation("TCP transfer server started on port {Port}", _tcpServer.Port);
+
+        // Start mDNS advertising
+        var deviceName = Environment.MachineName;
+        var deviceId = Guid.NewGuid().ToString(); // Ideally this should be persistent, but for now this works
+        await _advertiser.StartAdvertisingAsync(deviceName, _tcpServer.Port, deviceId, stoppingToken);
 
         try
         {

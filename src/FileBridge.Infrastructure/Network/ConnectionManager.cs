@@ -60,8 +60,7 @@ public sealed class ConnectionManager : IDisposable
             var handshakeMsg = new ProtocolMessage
             {
                 Type = MessageType.Handshake,
-                Payload = handshakePayload,
-                Length = handshakePayload.Length
+                Payload = handshakePayload
             };
 
             var data = _serializer.Serialize(handshakeMsg);
@@ -107,7 +106,7 @@ public sealed class ConnectionManager : IDisposable
         {
             try
             {
-                var msg = new ProtocolMessage { Type = MessageType.Disconnect, Length = 0 };
+                var msg = new ProtocolMessage { Type = MessageType.Disconnect };
                 var data = _serializer.Serialize(msg);
                 await _client.SendAsync(data);
             }
@@ -132,7 +131,6 @@ public sealed class ConnectionManager : IDisposable
                 throw new InvalidOperationException($"No active connection to device {deviceId}");
         }
 
-        message.Length = message.Payload.Length;
         var data = _serializer.Serialize(message);
         await _server.SendToClientAsync(client, data, ct);
     }
