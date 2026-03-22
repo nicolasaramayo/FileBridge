@@ -1,22 +1,26 @@
 namespace FileBridge.Domain.ValueObjects;
 
-public readonly record struct ChunkInfo
+public sealed class ChunkInfo : ValueObject
 {
-    public int Index { get; init; }
-    public long Offset { get; init; }
-    public int Size { get; init; }
-    public byte[] Checksum { get; init; }
-
-    public ChunkInfo(int index, long offset, int size, byte[] checksum)
+    public int Index { get; }
+    public int Size { get; }
+    public byte[] Data { get; }
+    
+    public ChunkInfo(int index, int size, byte[] data)
     {
-        if (checksum.Length != 4)
-            throw new ArgumentException("CRC32 checksum must be 4 bytes.", nameof(checksum));
-
+        if (index < 0)
+            throw new ArgumentException("Index cannot be negative", nameof(index));
+        if (size <= 0)
+            throw new ArgumentException("Size must be positive", nameof(size));
+        
         Index = index;
-        Offset = offset;
         Size = size;
-        Checksum = checksum;
+        Data = data ?? throw new ArgumentNullException(nameof(data));
     }
-
-    public uint ChecksumValue => BitConverter.ToUInt32(Checksum);
+    
+    protected override IEnumerable<object?> GetEqualityComponents()
+    {
+        yield return Index;
+        yield return Size;
+    }
 }
