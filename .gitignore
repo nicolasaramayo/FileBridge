@@ -7,6 +7,10 @@ obj/
 *.sln.docstates
 *.rsuser
 
+# Scripts
+*.bat
+*.ps1
+
 # Build results
 [Dd]ebug/
 [Rr]elease/
