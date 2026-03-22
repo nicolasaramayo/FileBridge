@@ -9,10 +9,13 @@ public class FileBridgeDbContext : IDisposable
 
     public FileBridgeDbContext(string dbPath)
     {
+        var syncDb = new SQLiteConnection(dbPath);
+        syncDb.CreateTable<TransferJobRecord>();
+        syncDb.CreateTable<DeviceRecord>();
+        syncDb.CreateTable<SettingRecord>();
+        syncDb.Close();
+
         _db = new SQLiteAsyncConnection(dbPath);
-        _db.CreateTableAsync<TransferJobRecord>().Wait();
-        _db.CreateTableAsync<DeviceRecord>().Wait();
-        _db.CreateTableAsync<SettingRecord>().Wait();
     }
 
     public AsyncTableQuery<TransferJobRecord> TransferJobs => _db.Table<TransferJobRecord>();

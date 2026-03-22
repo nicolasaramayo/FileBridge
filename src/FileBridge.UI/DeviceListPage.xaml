@@ -1,7 +1,7 @@
 <ContentPage
     x:Class="FileBridge.UI.DeviceListPage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
-    xmlns:x="http://schemas.microsoft.com/2006/xaml"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="clr-namespace:FileBridge.UI"
     xmlns:vm="clr-namespace:FileBridge.UI.ViewModels"
     xmlns:conv="clr-namespace:FileBridge.UI.Converters"

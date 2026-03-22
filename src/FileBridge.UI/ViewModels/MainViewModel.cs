@@ -14,11 +14,11 @@ public partial class MainViewModel : ViewModelBase
     }
     
     [RelayCommand]
-    private async Task OpenDevices() => await _navigation.GoToAsync("//devices");
+    private async Task OpenDevices() => await _navigation.GoToAsync("devices");
     
     [RelayCommand]
-    private async Task OpenTransfers() => await _navigation.GoToAsync("//transfers");
+    private async Task OpenTransfers() => await _navigation.GoToAsync("transfers");
     
     [RelayCommand]
-    private async Task OpenSettings() => await _navigation.GoToAsync("//settings");
+    private async Task OpenSettings() => await _navigation.GoToAsync("settings");
 }

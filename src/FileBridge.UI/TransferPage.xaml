@@ -1,11 +1,12 @@
 <ContentPage
     x:Class="FileBridge.UI.TransferPage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
-    xmlns:x="http://schemas.microsoft.com/2006/xaml"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="clr-namespace:FileBridge.UI"
     xmlns:vm="clr-namespace:FileBridge.UI.ViewModels"
     xmlns:conv="clr-namespace:FileBridge.UI.Converters"
-    Title="Transfers">
+    Title="Transfers"
+    x:Name="transferPage">
 
     <ContentPage.Resources>
         <conv:BytesToHumanReadableConverter x:Key="BytesConverter" />
@@ -70,15 +71,15 @@
                                 <!-- Action Buttons -->
                                 <StackLayout Orientation="Horizontal" Spacing="8" HorizontalOptions="End">
                                     <Button Text="⏸" 
-                                            Command="{Binding Source={x:Reference transferList}, Path=BindingContext.PauseTransferCommand}"
+                                            Command="{Binding Path=BindingContext.PauseTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
                                             CommandParameter="{Binding}"
                                             WidthRequest="44" HeightRequest="44" />
                                     <Button Text="▶" 
-                                            Command="{Binding Source={x:Reference transferList}, Path=BindingContext.ResumeTransferCommand}"
+                                            Command="{Binding Path=BindingContext.ResumeTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
                                             CommandParameter="{Binding}"
                                             WidthRequest="44" HeightRequest="44" />
                                     <Button Text="✕" 
-                                            Command="{Binding Source={x:Reference transferList}, Path=BindingContext.CancelTransferCommand}"
+                                            Command="{Binding Path=BindingContext.CancelTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
                                             CommandParameter="{Binding}"
                                             WidthRequest="44" HeightRequest="44" />
                                 </StackLayout>

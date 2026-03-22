@@ -19,6 +19,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(new FileBridgeDbContext(dbPath));
         services.AddSingleton<ITransferStore, SqliteTransferStore>();
         services.AddSingleton<FileBridge.Domain.Interfaces.IDeviceRepository, DeviceRepository>();
+        services.AddSingleton<ISettingsRepository, SettingsRepository>();
         services.AddSingleton<ISettingsService, SettingsService>();
 
         // Security

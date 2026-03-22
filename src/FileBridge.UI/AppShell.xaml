@@ -6,18 +6,7 @@
     xmlns:local="clr-namespace:FileBridge.UI"
     FlyoutBehavior="Disabled">
 
-    <TabBar>
-        <Tab Title="Devices" Icon="devices.png">
-            <ShellContent Route="devices" ContentTemplate="{DataTemplate local:DeviceListPage}" />
-        </Tab>
-        <Tab Title="Files" Icon="folder.png">
-            <ShellContent Route="files" ContentTemplate="{DataTemplate local:FileBrowserPage}" />
-        </Tab>
-        <Tab Title="Transfers" Icon="transfer.png">
-            <ShellContent Route="transfers" ContentTemplate="{DataTemplate local:TransferPage}" />
-        </Tab>
-        <Tab Title="Settings" Icon="settings.png">
-            <ShellContent Route="settings" ContentTemplate="{DataTemplate local:SettingsPage}" />
-        </Tab>
-    </TabBar>
+    <!-- Solo cargar MainPage inicialmente, las otras páginas se cargan on-demand -->
+    <ShellContent Route="home" ContentTemplate="{DataTemplate local:MainPage}" />
+
 </Shell>
