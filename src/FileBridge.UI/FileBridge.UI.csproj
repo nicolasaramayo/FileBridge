@@ -34,13 +34,7 @@
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
 	</ItemGroup>
 
-	<!--
-		EXCLUDE Phase 9 XAML pages from MauiXaml/XamlC compilation.
-		These pages use LoadFromXaml() at runtime instead of compile-time XamlC.
-		This works around the MAUI XC0009 bug (namespace mismatch in skips list)
-		present in Microsoft.Maui.Controls.Build.Tasks 9.0.120 with .NET 9/10 SDK.
-		See: github.com/dotnet/maui/issues/22975, #23042
-		-->
+	<!-- Exclude Phase 9 pages from XamlC to avoid XC0009 bug -->
 	<ItemGroup>
 		<MauiXaml Remove="**/DeviceListPage.xaml" />
 		<MauiXaml Remove="**/FileBrowserPage.xaml" />
@@ -49,11 +43,30 @@
 		<MauiXaml Remove="**/TransferPage.xaml" />
 	</ItemGroup>
 
-	<!-- Explicit Page items for Windows (EnableDefaultPageItems=false) -->
+	<!-- Explicit Page items -->
 	<ItemGroup>
 		<Page Include="App.xaml" />
 		<Page Include="AppShell.xaml" />
 		<Page Include="MainPage.xaml" />
+	</ItemGroup>
+
+	<!-- Include Phase 9 XAML as EmbeddedResource with correct names -->
+	<ItemGroup>
+		<EmbeddedResource Include="DeviceListPage.xaml">
+			<Generator>MSBuild:UpdateDesignTimeXaml</Generator>
+		</EmbeddedResource>
+		<EmbeddedResource Include="FileBrowserPage.xaml">
+			<Generator>MSBuild:UpdateDesignTimeXaml</Generator>
+		</EmbeddedResource>
+		<EmbeddedResource Include="PairingPage.xaml">
+			<Generator>MSBuild:UpdateDesignTimeXaml</Generator>
+		</EmbeddedResource>
+		<EmbeddedResource Include="SettingsPage.xaml">
+			<Generator>MSBuild:UpdateDesignTimeXaml</Generator>
+		</EmbeddedResource>
+		<EmbeddedResource Include="TransferPage.xaml">
+			<Generator>MSBuild:UpdateDesignTimeXaml</Generator>
+		</EmbeddedResource>
 	</ItemGroup>
 
 	<ItemGroup>
