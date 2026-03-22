@@ -20,6 +20,14 @@ public sealed class TransferProtocolHandler
         _logger = logger;
     }
 
+    private static async Task SendMessageAsync(TcpClient client, ProtocolMessage message, CancellationToken ct)
+    {
+        var data = BitConverter.GetBytes(message.Length);
+        await client.GetStream().WriteAsync(data.AsMemory(), ct);
+        await client.GetStream().WriteAsync(message.Payload.AsMemory(), ct);
+        await client.GetStream().FlushAsync(ct);
+    }
+
     public async Task HandleMessageAsync(ProtocolMessage message, TcpClient client, CancellationToken ct = default)
     {
         switch (message.Type)
@@ -60,7 +68,7 @@ public sealed class TransferProtocolHandler
         }
     }
 
-    private Task HandleHandshakeAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
+    private async Task HandleHandshakeAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
     {
         try
         {
@@ -77,16 +85,15 @@ public sealed class TransferProtocolHandler
                 Payload = responsePayload,
                 Length = responsePayload.Length
             };
+            await SendMessageAsync(client, response, ct);
         }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Error processing handshake");
         }
-
-        return Task.CompletedTask;
     }
 
-    private Task HandleConnectAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
+    private async Task HandleConnectAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
     {
         try
         {
@@ -107,13 +114,12 @@ public sealed class TransferProtocolHandler
                 Payload = ackPayload,
                 Length = ackPayload.Length
             };
+            await SendMessageAsync(client, ackMsg, ct);
         }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Error processing connect");
         }
-
-        return Task.CompletedTask;
     }
 
     private Task HandleListFilesAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
@@ -166,7 +172,7 @@ public sealed class TransferProtocolHandler
         return Task.CompletedTask;
     }
 
-    private Task HandleDataAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
+    private async Task HandleDataAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)
     {
         try
         {
@@ -177,7 +183,7 @@ public sealed class TransferProtocolHandler
             if (computed != checksum)
             {
                 _logger?.LogWarning("Data chunk {Index} checksum mismatch", chunkIndex);
-                return Task.CompletedTask;
+                return;
             }
 
             _logger?.LogInformation("Data chunk {Index} received ({Size} bytes)", chunkIndex, data.Length);
@@ -190,13 +196,12 @@ public sealed class TransferProtocolHandler
                 Payload = ackPayload,
                 Length = ackPayload.Length
             };
+            await SendMessageAsync(client, ackMsg, ct);
         }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Error processing data message");
         }
-
-        return Task.CompletedTask;
     }
 
     private Task HandlePauseAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)

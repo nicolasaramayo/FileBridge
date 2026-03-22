@@ -70,6 +70,12 @@ public sealed class ConnectionManager : IDisposable
             lock (_lock)
             {
                 _devices[device.Id.ToString()] = device;
+                // Store the underlying TcpClient for outbound connection tracking
+                var underlyingClient = _client.GetClient();
+                if (underlyingClient != null)
+                {
+                    _activeConnections[device.Id.ToString()] = underlyingClient;
+                }
             }
 
             _logger?.LogInformation("Connected to device: {Name}", device.Name);

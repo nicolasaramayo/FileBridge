@@ -13,9 +13,14 @@ public sealed class TcpFileClient : IDisposable
     private int _reconnectDelayMs = 1000;
     private const int MaxReconnectDelayMs = 30000;
 
-    public string? Host { get; private set; }
+    public string Host { get; private set; } = string.Empty;
     public int Port { get; private set; }
     public bool IsConnected => _client?.Connected ?? false;
+
+    /// <summary>
+    /// Gets the underlying TcpClient for connection tracking.
+    /// </summary>
+    public System.Net.Sockets.TcpClient? GetClient() => _client;
 
     public event EventHandler? OnConnected;
     public event EventHandler? OnDisconnected;
