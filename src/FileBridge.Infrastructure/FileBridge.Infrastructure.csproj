@@ -17,6 +17,7 @@
     <PackageReference Include="SQLitePCLRaw.bundle_green" />
     <PackageReference Include="System.Formats.Asn1" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
 </Project>
