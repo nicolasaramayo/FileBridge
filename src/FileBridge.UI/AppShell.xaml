@@ -2,13 +2,11 @@
 <Shell
     x:Class="FileBridge.UI.AppShell"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
-    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="clr-namespace:FileBridge.UI"
-    Title="FileBridge.UI">
+    FlyoutBehavior="Disabled">
 
-    <ShellContent
-        Title="Home"
-        ContentTemplate="{DataTemplate local:MainPage}"
-        Route="MainPage" />
+    <!-- Solo cargar MainPage inicialmente, las otras páginas se cargan on-demand -->
+    <ShellContent Route="home" ContentTemplate="{DataTemplate local:MainPage}" />
 
 </Shell>

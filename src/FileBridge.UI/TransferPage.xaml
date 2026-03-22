@@ -1,0 +1,142 @@
+<ContentPage
+    x:Class="FileBridge.UI.TransferPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="clr-namespace:FileBridge.UI"
+    xmlns:vm="clr-namespace:FileBridge.UI.ViewModels"
+    xmlns:conv="clr-namespace:FileBridge.UI.Converters"
+    Title="Transfers"
+    x:Name="transferPage">
+
+    <ContentPage.Resources>
+        <conv:BytesToHumanReadableConverter x:Key="BytesConverter" />
+        <conv:ProgressToPercentConverter x:Key="ProgressToPercentConverter" />
+        <conv:TransferStatusToColorConverter x:Key="StatusColorConverter" />
+        <conv:IsEmptyConverter x:Key="IsEmptyConverter" />
+    </ContentPage.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackLayout Grid.Row="0" Padding="16,12" BackgroundColor="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}">
+            <Label Text="Active Transfers" FontSize="20" FontAttributes="Bold" TextColor="White" />
+        </StackLayout>
+
+        <!-- Active Transfers List -->
+        <ListView Grid.Row="1" 
+                  ItemsSource="{Binding ActiveTransfers}"
+                  HasUnevenRows="True">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <ViewCell>
+                        <Frame Margin="12,6" Padding="12" CornerRadius="10"
+                               BorderColor="{Binding Status, Converter={StaticResource StatusColorConverter}}">
+                            <StackLayout Spacing="8">
+                                <!-- File Name -->
+                                <Label Text="{Binding LocalFilePath}" 
+                                       FontSize="16" FontAttributes="Bold" 
+                                       LineBreakMode="TailTruncation" />
+                                
+                                <!-- Progress Bar -->
+                                <ProgressBar Progress="{Binding TransferredBytes}" />
+                                
+                                <!-- Progress Info -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    
+                                    <Label Grid.Column="0" 
+                                           FontSize="12" Opacity="0.7">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding TransferredBytes, Converter={StaticResource BytesConverter}}" />
+                                                <Span Text=" / " />
+                                                <Span Text="{Binding TotalBytes, Converter={StaticResource BytesConverter}}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+                                    
+                                    <Label Grid.Column="1" 
+                                           Text="{Binding Status}" 
+                                           FontSize="12" 
+                                           TextColor="{Binding Status, Converter={StaticResource StatusColorConverter}}" />
+                                </Grid>
+                                
+                                <!-- Action Buttons -->
+                                <StackLayout Orientation="Horizontal" Spacing="8" HorizontalOptions="End">
+                                    <Button Text="⏸" 
+                                            Command="{Binding Path=BindingContext.PauseTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
+                                            CommandParameter="{Binding}"
+                                            WidthRequest="44" HeightRequest="44" />
+                                    <Button Text="▶" 
+                                            Command="{Binding Path=BindingContext.ResumeTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
+                                            CommandParameter="{Binding}"
+                                            WidthRequest="44" HeightRequest="44" />
+                                    <Button Text="✕" 
+                                            Command="{Binding Path=BindingContext.CancelTransferCommand, Source={RelativeSource AncestorType={x:Type ContentPage}}}"
+                                            CommandParameter="{Binding}"
+                                            WidthRequest="44" HeightRequest="44" />
+                                </StackLayout>
+                            </StackLayout>
+                        </Frame>
+                    </ViewCell>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Transfer History Section -->
+        <StackLayout Grid.Row="1" Margin="0,0,0,0" VerticalOptions="End">
+            <ListView x:Name="transferList"
+                      ItemsSource="{Binding TransferHistory}"
+                      HasUnevenRows="True"
+                      HeightRequest="200">
+                <ListView.Header>
+                    <Label Text="History" FontSize="16" FontAttributes="Bold" Padding="16,8" />
+                </ListView.Header>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <ViewCell>
+                            <Frame Margin="12,4" Padding="10" CornerRadius="8"
+                                   BorderColor="{Binding Status, Converter={StaticResource StatusColorConverter}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackLayout Grid.Column="0">
+                                        <Label Text="{Binding LocalFilePath}" FontSize="14" LineBreakMode="TailTruncation" />
+                                        <Label Text="{Binding CompletedAt, StringFormat='{}{0:MMM dd, HH:mm}'}" 
+                                               FontSize="11" Opacity="0.7" />
+                                    </StackLayout>
+                                    <Label Grid.Column="1" 
+                                           Text="{Binding Status}" 
+                                           FontSize="12" 
+                                           TextColor="{Binding Status, Converter={StaticResource StatusColorConverter}}"
+                                           VerticalOptions="Center" />
+                                </Grid>
+                            </Frame>
+                        </ViewCell>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </StackLayout>
+
+        <!-- Empty State -->
+        <StackLayout Grid.Row="1" 
+                     HorizontalOptions="Center" 
+                     VerticalOptions="Center"
+                     Spacing="12"
+                     IsVisible="{Binding ActiveTransfers.Count, Converter={StaticResource IsEmptyConverter}}">
+            <Label Text="📤" FontSize="64" HorizontalOptions="Center" />
+            <Label Text="No active transfers" FontSize="18" FontAttributes="Bold" HorizontalOptions="Center" />
+            <Label Text="Send or receive files from a paired device" FontSize="14" Opacity="0.7" />
+            <Button Text="View History" Command="{Binding LoadHistoryCommand}" Margin="0,10,0,0" />
+        </StackLayout>
+    </Grid>
+</ContentPage>

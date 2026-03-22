@@ -1,0 +1,86 @@
+<ContentPage
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="clr-namespace:FileBridge.UI"
+    xmlns:vm="clr-namespace:FileBridge.UI.ViewModels"
+    xmlns:conv="clr-namespace:FileBridge.UI.Converters"
+    Title="Browse Files">
+
+    <ContentPage.Resources>
+        <conv:BytesToHumanReadableConverter x:Key="BytesConverter" />
+        <conv:FileSizeConverter x:Key="FileSizeConverter" />
+        <conv:BoolToInverseConverter x:Key="InverseBoolConverter" />
+        <conv:IsEmptyConverter x:Key="IsEmptyConverter" />
+    </ContentPage.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Navigation Bar -->
+        <StackLayout Grid.Row="0" Orientation="Horizontal" Padding="10" BackgroundColor="{AppThemeBinding Light={StaticResource Gray100}, Dark={StaticResource Gray900}}">
+            <Button Text="⬆" Command="{Binding NavigateUpCommand}" WidthRequest="44" />
+            <Label Text="{Binding CurrentDirectory}" VerticalOptions="Center" FontSize="14" HorizontalOptions="FillAndExpand" LineBreakMode="TailTruncation" />
+            <Button Text="⟳" Command="{Binding LoadFilesCommand}" WidthRequest="44" />
+        </StackLayout>
+
+        <!-- Action Bar -->
+        <StackLayout Grid.Row="1" Orientation="Horizontal" Padding="10,5" Spacing="10">
+            <Button Text="📁 Pick File" Command="{Binding PickFileCommand}" />
+            <Button Text="☑ Multi-Select" Command="{Binding ToggleMultiSelectCommand}" 
+                    IsEnabled="{Binding IsMultiSelectMode, Converter={StaticResource InverseBoolConverter}}" />
+            <Button Text="📤 Send Selected" Command="{Binding SendSelectedCommand}" 
+                    IsVisible="{Binding IsMultiSelectMode}" />
+        </StackLayout>
+
+        <!-- File List -->
+        <ListView Grid.Row="2" 
+                  ItemsSource="{Binding Files}" 
+                  SelectedItem="{Binding SelectedFile}"
+                  HasUnevenRows="True"
+                  RefreshCommand="{Binding LoadFilesCommand}"
+                  IsPullToRefreshEnabled="True">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <ViewCell Tapped="OnFileTapped" GestureRecognizers="{Binding ., Converter={StaticResource InverseBoolConverter}}">
+                        <StackLayout Orientation="Horizontal" Padding="12,8">
+                            <!-- File Icon -->
+                            <Label Text="📄" FontSize="24" VerticalOptions="Center" WidthRequest="40" />
+                            
+                            <!-- File Info -->
+                            <StackLayout VerticalOptions="Center" HorizontalOptions="FillAndExpand">
+                                <Label Text="{Binding FileName}" FontSize="16" LineBreakMode="TailTruncation" />
+                                <Label Text="{Binding FileSize, Converter={StaticResource FileSizeConverter}}" 
+                                       FontSize="12" Opacity="0.7" />
+                            </StackLayout>
+                            
+                            <!-- Folder indicator -->
+                            <Label Text="▶" FontSize="14" Opacity="0.5" VerticalOptions="Center" />
+                        </StackLayout>
+                    </ViewCell>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Loading Indicator -->
+        <ActivityIndicator Grid.Row="2" 
+                          IsRunning="{Binding IsBusy}" 
+                          IsVisible="{Binding IsBusy}"
+                          HorizontalOptions="Center" 
+                          VerticalOptions="Center" />
+
+        <!-- Empty State -->
+        <StackLayout Grid.Row="2" 
+                     IsVisible="{Binding Files.Count, Converter={StaticResource IsEmptyConverter}}"
+                     HorizontalOptions="Center" 
+                     VerticalOptions="Center"
+                     Spacing="10">
+            <Label Text="📂" FontSize="48" HorizontalOptions="Center" />
+            <Label Text="No files found" FontSize="16" Opacity="0.7" />
+            <Button Text="Refresh" Command="{Binding LoadFilesCommand}" />
+        </StackLayout>
+    </Grid>
+</ContentPage>
