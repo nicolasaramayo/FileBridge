@@ -38,7 +38,8 @@ public partial class FileBrowserViewModel : ViewModelBase, IQueryAttributable
     /// <summary>Shell delivers the navigation parameters here (before, "device" never reached this VM).</summary>
     public void ApplyQueryAttributes(IDictionary<string, object> query)
     {
-        if (query.TryGetValue("device", out var value) && value is DomainDevice device)
+        // Same device again (e.g. Shell re-applying the query on back navigation): keep the current folder.
+        if (query.TryGetValue("device", out var value) && value is DomainDevice device && device.Id != _currentDevice?.Id)
             SetDevice(device);
     }
 

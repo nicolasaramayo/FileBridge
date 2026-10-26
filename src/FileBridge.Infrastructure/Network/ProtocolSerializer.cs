@@ -208,14 +208,24 @@ public sealed class ProtocolSerializer
         return ms.ToArray();
     }
 
+    // Data layout: ChunkIndex(4) + Offset(8) + DataLength(4) + Data + CRC32(4)
+    private const int DataFixedSize = 4 + 8 + 4 + 4;
+
     public (int ChunkIndex, long Offset, byte[] Data, uint Checksum) ParseDataPayload(byte[] payload)
     {
+        if (payload.Length < DataFixedSize)
+            throw new InvalidDataException("Data payload is too short.");
+
         using var ms = new MemoryStream(payload);
         using var reader = new BinaryReader(ms);
 
         var chunkIndex = reader.ReadInt32();
         var offset = reader.ReadInt64();
         var dataLen = reader.ReadInt32();
+        // Never trust the declared length: BinaryReader.ReadBytes allocates it up front, so a forged
+        // value near 2^31 in a 20-byte frame would make the receiver try to allocate ~2 GB.
+        if (dataLen < 0 || dataLen > MaxChunkSize || dataLen != payload.Length - DataFixedSize)
+            throw new InvalidDataException($"Invalid data length {dataLen} for a {payload.Length}-byte payload.");
         var data = reader.ReadBytes(dataLen);
         var checksum = reader.ReadUInt32();
 

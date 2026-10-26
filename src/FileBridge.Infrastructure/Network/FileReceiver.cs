@@ -7,6 +7,9 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 
+/// <summary>What the user is asked to accept before anything is written to disk.</summary>
+public sealed record IncomingFileOffer(Guid TransferId, string FileName, long Size, string? PeerName, string? RemoteEndpoint);
+
 public sealed class FileReceivedEventArgs : EventArgs
 {
     public required Guid TransferId { get; init; }
@@ -36,14 +39,21 @@ public sealed class ReceiveFailedEventArgs : EventArgs
 
 /// <summary>
 /// Writes incoming files to disk: one receive session per TCP connection
-/// (FileRequest → Data… → TransferComplete). Data goes to "&lt;name&gt;.part" and is renamed only
-/// after size and SHA-256 match what the sender announced, so a broken transfer never leaves
-/// a file that looks complete.
+/// (FileRequest → Data… → TransferComplete). Every file must be accepted first through
+/// <see cref="ApproveIncoming"/>; without an approver nothing is accepted. Data goes to "&lt;name&gt;.part"
+/// and is renamed only after size and SHA-256 match what the sender announced, so a broken transfer
+/// never leaves a file that looks complete.
 /// </summary>
 public sealed class FileReceiver
 {
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
     private static readonly char[] ForbiddenFileNameChars = "\\/:*?\"<>|".ToCharArray();
+    private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
 
     private readonly FileBridgeOptions _options;
     private readonly ILogger? _logger;
@@ -53,6 +63,13 @@ public sealed class FileReceiver
     public event EventHandler<FileReceivedEventArgs>? FileReceived;
     public event EventHandler<ReceiveProgressEventArgs>? Progress;
     public event EventHandler<ReceiveFailedEventArgs>? ReceiveFailed;
+
+    /// <summary>
+    /// Decides whether an incoming file is accepted (the app asks the user). If it is null, every
+    /// file is declined: since the server listens on the whole LAN, accepting silently would let any
+    /// device on the same Wi-Fi drop files on this one.
+    /// </summary>
+    public Func<IncomingFileOffer, CancellationToken, Task<bool>>? ApproveIncoming { get; set; }
 
     public string ReceivedFilesDirectory => _options.ReceivedFilesDirectory;
 
@@ -64,7 +81,7 @@ public sealed class FileReceiver
 
     public int ActiveSessions => _sessions.Count;
 
-    public Task BeginAsync(TcpClient connection, Guid transferId, string fileName, long size, string? peerName, CancellationToken ct = default)
+    public async Task BeginAsync(TcpClient connection, Guid transferId, string fileName, long size, string? peerName, CancellationToken ct = default)
     {
         if (size < 0 || size > _options.MaxIncomingFileSize)
             throw new ProtocolException(ProtocolErrorCodes.BadRequest, $"File size {size} is not accepted.");
@@ -73,6 +90,9 @@ public sealed class FileReceiver
         Abort(connection, "superseded by a new FileRequest");
 
         var safeName = SanitizeFileName(fileName);
+        var remoteEndpoint = connection.Client?.RemoteEndPoint?.ToString();
+        await EnsureApprovedAsync(new IncomingFileOffer(transferId, safeName, size, peerName, remoteEndpoint), ct);
+
         string finalPath, partPath;
         FileStream stream;
         try
@@ -92,11 +112,44 @@ public sealed class FileReceiver
                 $"Cannot write to '{_options.ReceivedFilesDirectory}': {ex.Message}", ex);
         }
 
-        var session = new Session(transferId, safeName, size, partPath, finalPath, stream, peerName,
-            connection.Client?.RemoteEndPoint?.ToString());
+        var session = new Session(transferId, safeName, size, partPath, finalPath, stream, peerName, remoteEndpoint);
         _sessions[connection] = session;
-        _logger?.LogInformation("Receiving {File} ({Size} bytes) from {Peer} into {Path}", safeName, size, peerName ?? session.RemoteEndpoint, partPath);
-        return Task.CompletedTask;
+        _logger?.LogInformation("Receiving {File} ({Size} bytes) from {Peer} into {Path}", safeName, size, peerName ?? remoteEndpoint, partPath);
+    }
+
+    private async Task EnsureApprovedAsync(IncomingFileOffer offer, CancellationToken ct)
+    {
+        var approve = ApproveIncoming;
+        if (approve is null)
+            throw new ProtocolException(ProtocolErrorCodes.Forbidden, "this device is not accepting files");
+
+        bool accepted;
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            timeout.CancelAfter(_options.IncomingApprovalTimeout);
+            try
+            {
+                // WaitAsync: the timeout applies even if the approver ignores the token.
+                accepted = await approve(offer, timeout.Token).WaitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger?.LogInformation("Nobody answered for {File} from {Peer}", offer.FileName, offer.PeerName ?? offer.RemoteEndpoint);
+                throw new ProtocolException(ProtocolErrorCodes.Forbidden,
+                    $"nobody accepted the file within {_options.IncomingApprovalTimeout.TotalSeconds:0} s");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogWarning(ex, "The approval prompt failed; declining {File}", offer.FileName);
+                accepted = false;
+            }
+        }
+
+        if (!accepted)
+        {
+            _logger?.LogInformation("Declined {File} from {Peer}", offer.FileName, offer.PeerName ?? offer.RemoteEndpoint);
+            throw new ProtocolException(ProtocolErrorCodes.Forbidden, "declined on the receiving device");
+        }
     }
 
     public async Task WriteChunkAsync(TcpClient connection, long offset, byte[] data, CancellationToken ct = default)
@@ -112,7 +165,7 @@ public sealed class FileReceiver
         {
             await s.Stream.WriteAsync(data, ct);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             throw new ProtocolException(ProtocolErrorCodes.InsufficientStorage, $"Could not write the file: {ex.Message}", ex);
         }
@@ -124,14 +177,14 @@ public sealed class FileReceiver
         if (now - s.LastProgressAt >= ProgressInterval || s.BytesWritten == s.ExpectedSize)
         {
             s.LastProgressAt = now;
-            Progress?.Invoke(this, new ReceiveProgressEventArgs
+            Raise(Progress, new ReceiveProgressEventArgs
             {
                 TransferId = s.TransferId,
                 FileName = s.FileName,
                 BytesReceived = s.BytesWritten,
                 TotalBytes = s.ExpectedSize,
                 PeerName = s.PeerName
-            });
+            }, nameof(Progress));
         }
     }
 
@@ -141,6 +194,7 @@ public sealed class FileReceiver
         if (!_sessions.TryRemove(connection, out var s))
             throw new ProtocolException(ProtocolErrorCodes.Conflict, "TransferComplete received without an active FileRequest.");
 
+        FileReceivedEventArgs received;
         try
         {
             await s.Stream.FlushAsync(ct);
@@ -156,13 +210,20 @@ public sealed class FileReceiver
                 throw new ProtocolException(ProtocolErrorCodes.IntegrityFailed, "SHA-256 of the received file does not match the sender's.");
 
             string finalPath;
-            lock (_pathLock)
+            try
             {
-                finalPath = File.Exists(s.FinalPath) ? GetUniquePath(Path.GetDirectoryName(s.FinalPath)!, s.FileName) : s.FinalPath;
-                File.Move(s.PartPath, finalPath);
+                lock (_pathLock)
+                {
+                    finalPath = File.Exists(s.FinalPath) ? GetUniquePath(Path.GetDirectoryName(s.FinalPath)!, s.FileName) : s.FinalPath;
+                    File.Move(s.PartPath, finalPath);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new ProtocolException(ProtocolErrorCodes.Internal, $"Could not save the file: {ex.Message}", ex);
             }
 
-            var received = new FileReceivedEventArgs
+            received = new FileReceivedEventArgs
             {
                 TransferId = s.TransferId,
                 FileName = Path.GetFileName(finalPath),
@@ -172,9 +233,6 @@ public sealed class FileReceiver
                 PeerName = s.PeerName,
                 RemoteEndpoint = s.RemoteEndpoint
             };
-            _logger?.LogInformation("Received {File} ({Size} bytes, SHA-256 OK) -> {Path}", received.FileName, received.Size, finalPath);
-            FileReceived?.Invoke(this, received);
-            return received;
         }
         catch (Exception ex)
         {
@@ -186,6 +244,11 @@ public sealed class FileReceiver
         {
             s.Hash.Dispose();
         }
+
+        // The file is already in place: a failing subscriber must not turn this into an error for the sender.
+        _logger?.LogInformation("Received {File} ({Size} bytes, SHA-256 OK) -> {Path}", received.FileName, received.Size, received.FullPath);
+        Raise(FileReceived, received, nameof(FileReceived));
+        return received;
     }
 
     /// <summary>Drops an unfinished transfer on this connection (disconnect, protocol error…) and deletes the partial file.</summary>
@@ -203,10 +266,32 @@ public sealed class FileReceiver
     {
         try { if (File.Exists(s.PartPath)) File.Delete(s.PartPath); } catch { /* best effort */ }
         _logger?.LogWarning("Transfer of {File} aborted ({Received}/{Expected} bytes): {Reason}", s.FileName, s.BytesWritten, s.ExpectedSize, reason);
-        ReceiveFailed?.Invoke(this, new ReceiveFailedEventArgs { TransferId = s.TransferId, FileName = s.FileName, Reason = reason });
+        Raise(ReceiveFailed, new ReceiveFailedEventArgs { TransferId = s.TransferId, FileName = s.FileName, Reason = reason }, nameof(ReceiveFailed));
     }
 
-    /// <summary>Keeps only the file name (no directories → no path traversal) and removes characters invalid on Windows/Android.</summary>
+    /// <summary>Calls every subscriber; one that throws is logged and does not affect the transfer or the others.</summary>
+    private void Raise<T>(EventHandler<T>? handler, T args, string eventName)
+    {
+        if (handler is null)
+            return;
+
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<T>)subscriber)(this, args);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "A {Event} subscriber threw", eventName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keeps only the file name (no directories → no path traversal), removes characters invalid on
+    /// Windows/Android and avoids Windows device names (CON, NUL, COM1…), which cannot be used as files.
+    /// </summary>
     public static string SanitizeFileName(string? fileName)
     {
         var name = (fileName ?? string.Empty).Replace('\\', '/');
@@ -220,6 +305,12 @@ public sealed class FileReceiver
             var ext = Path.GetExtension(name);
             name = name[..(180 - Math.Min(ext.Length, 20))] + ext[..Math.Min(ext.Length, 20)];
         }
+
+        // "nul.txt" and "con.part" are devices on Windows: the part before the first dot decides.
+        var stem = name.Split('.')[0].TrimEnd(' ');
+        if (WindowsReservedNames.Contains(stem))
+            name = "_" + name;
+
         return name;
     }
 

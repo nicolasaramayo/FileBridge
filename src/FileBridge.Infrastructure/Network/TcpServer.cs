@@ -113,12 +113,17 @@ public sealed class TcpServer : IDisposable
 
     private async Task SendToClientInternalAsync(TcpClient client, byte[] data, CancellationToken ct)
     {
-        if (!client.Connected)
-            throw new IOException("Client is not connected");
-
         // Same framing as TcpFileClient (length prefix). Writes on one connection are serialized
-        // so two replies can never interleave their bytes.
-        var writeLock = _writeLocks.GetOrAdd(client, _ => new SemaphoreSlim(1, 1));
+        // so two replies can never interleave their bytes. The lock is created and removed under
+        // _clientsLock, so a send can never re-create one for a connection that already ended.
+        SemaphoreSlim writeLock;
+        lock (_clientsLock)
+        {
+            if (!client.Connected || !_clients.Contains(client))
+                throw new IOException("Client is not connected");
+            writeLock = _writeLocks.GetOrAdd(client, _ => new SemaphoreSlim(1, 1));
+        }
+
         await writeLock.WaitAsync(ct);
         try
         {
@@ -202,11 +207,11 @@ public sealed class TcpServer : IDisposable
             lock (_clientsLock)
             {
                 _clients.Remove(client);
+                // Not disposed: a concurrent sender may still be waiting on it (it then fails on the closed socket).
+                _writeLocks.TryRemove(client, out _);
             }
 
             try { client.Close(); } catch { /* ignore */ }
-            if (_writeLocks.TryRemove(client, out var writeLock))
-                writeLock.Dispose();
 
             OnClientDisconnected?.Invoke(this, new ClientDisconnectedEventArgs(client));
             _logger?.LogInformation("Client disconnected: {Endpoint}", remoteEndpoint);

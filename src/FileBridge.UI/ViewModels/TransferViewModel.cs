@@ -17,8 +17,14 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
     private readonly ITransferStore _transferStore;
     private readonly INavigationService _navigationService;
     private readonly ITransferBackgroundService _transfers;
+
+    // All guarded by _lock. A job can finish before QueueUploadAsync returns its id (tiny files),
+    // so results that arrive for an id we do not know yet are kept until it is registered.
+    private readonly object _lock = new();
     private readonly Dictionary<string, string> _queuedJobs = new(); // jobId -> file name
     private readonly Dictionary<string, string> _finishedBeforeTracked = new(); // jobId -> final message
+    private bool _queueing;
+    private bool _subscribed;
     private bool _queued;
 
     [ObservableProperty]
@@ -33,6 +39,10 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
     /// <summary>What is happening with the transfer(s) started from this page.</summary>
     [ObservableProperty]
     private string _statusMessage = string.Empty;
+
+    /// <summary>"No active transfers" must not cover the page while a file is being sent.</summary>
+    [ObservableProperty]
+    private bool _showEmptyState = true;
 
     public TransferViewModel(
         TransferOrchestrator transferOrchestrator,
@@ -63,38 +73,85 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
         if (files.Count == 0)
             return;
 
-        _queued = true; // Shell can re-apply the query when navigating back to this page
+        _queued = true; // never queue the same selection twice
         _ = QueueAsync(files, device);
     }
 
     private async Task QueueAsync(IReadOnlyList<FileItem> files, DomainDevice device)
     {
+        // Set before queuing: a fast job can report its result while we are still in the loop below.
+        StatusMessage = files.Count == 1
+            ? $"Waiting for {device.Name} to accept {files[0].FileName}…"
+            : $"Waiting for {device.Name} to accept {files.Count} files…";
+        ShowEmptyState = false;
+
+        lock (_lock)
+            _queueing = true;
+        Subscribe();
+
+        try
+        {
+            foreach (var file in files)
+            {
+                var jobId = await _transfers.QueueUploadAsync(file, device);
+                string? earlyResult;
+                lock (_lock)
+                {
+                    _queuedJobs[jobId] = file.FileName;
+                    _finishedBeforeTracked.Remove(jobId, out earlyResult);
+                }
+                if (earlyResult != null)
+                    Finish(jobId, earlyResult);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetError($"Could not queue the transfer: {ex.Message}");
+            StatusMessage = $"✗ Could not queue the transfer: {ex.Message}";
+        }
+        finally
+        {
+            lock (_lock)
+            {
+                _queueing = false;
+                _finishedBeforeTracked.Clear();
+            }
+            UnsubscribeIfDone();
+        }
+    }
+
+    private void Subscribe()
+    {
+        lock (_lock)
+        {
+            if (_subscribed)
+                return;
+            _subscribed = true;
+        }
         _transferOrchestrator.OnProgressChanged += OnProgress;
         _transfers.OnTransferCompleted += OnCompleted;
         _transfers.OnTransferFailed += OnFailed;
+    }
 
-        foreach (var file in files)
+    /// <summary>Only once every queued file has finished: the view model is transient and the services are singletons.</summary>
+    private void UnsubscribeIfDone()
+    {
+        lock (_lock)
         {
-            var jobId = await _transfers.QueueUploadAsync(file, device);
-            string? earlyResult;
-            lock (_queuedJobs)
-            {
-                _queuedJobs[jobId] = file.FileName;
-                _finishedBeforeTracked.Remove(jobId, out earlyResult);
-            }
-            if (earlyResult != null)
-                Finish(jobId, earlyResult); // a tiny file can finish before QueueUploadAsync returns
+            if (!_subscribed || _queueing || _queuedJobs.Count > 0)
+                return;
+            _subscribed = false;
         }
-
-        StatusMessage = files.Count == 1
-            ? $"Sending {files[0].FileName} to {device.Name} ({device.IpAddress}:{device.Port})…"
-            : $"Sending {files.Count} files to {device.Name}…";
+        _transferOrchestrator.OnProgressChanged -= OnProgress;
+        _transfers.OnTransferCompleted -= OnCompleted;
+        _transfers.OnTransferFailed -= OnFailed;
+        MainThread.BeginInvokeOnMainThread(() => ShowEmptyState = ActiveTransfers.Count == 0);
     }
 
     private void OnProgress(object? sender, TransferProgressEventArgs e)
     {
         string? fileName;
-        lock (_queuedJobs)
+        lock (_lock)
             _queuedJobs.TryGetValue(e.JobId, out fileName);
         if (fileName is null)
             return;
@@ -112,25 +169,19 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
 
     private void Finish(string jobId, string message)
     {
-        bool allDone;
-        lock (_queuedJobs)
+        lock (_lock)
         {
             if (!_queuedJobs.Remove(jobId))
             {
-                _finishedBeforeTracked[jobId] = message;
+                // Not registered yet (still queuing), or a job started from another page.
+                if (_queueing)
+                    _finishedBeforeTracked[jobId] = message;
                 return;
             }
-            allDone = _queuedJobs.Count == 0;
-        }
-
-        if (allDone)
-        {
-            _transferOrchestrator.OnProgressChanged -= OnProgress;
-            _transfers.OnTransferCompleted -= OnCompleted;
-            _transfers.OnTransferFailed -= OnFailed;
         }
 
         MainThread.BeginInvokeOnMainThread(() => StatusMessage = message);
+        UnsubscribeIfDone();
     }
 
     [RelayCommand]
@@ -154,8 +205,7 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
 
         try
         {
-            await _transferOrchestrator.PauseAsync(job.Id.ToString());
-            job.Status = Domain.Enums.TransferStatus.Paused;
+            await _transfers.PauseAsync(job.Id.ToString());
         }
         catch (Exception ex)
         {
@@ -170,7 +220,7 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
 
         try
         {
-            await _transferOrchestrator.ResumeAsync(job.Id.ToString());
+            await _transfers.ResumeAsync(job.Id.ToString());
         }
         catch (Exception ex)
         {
@@ -185,8 +235,7 @@ public partial class TransferViewModel : ViewModelBase, IQueryAttributable
 
         try
         {
-            await _transferOrchestrator.CancelAsync(job.Id.ToString());
-            job.Status = Domain.Enums.TransferStatus.Cancelled;
+            await _transfers.CancelAsync(job.Id.ToString());
             await LoadHistoryAsync();
         }
         catch (Exception ex)

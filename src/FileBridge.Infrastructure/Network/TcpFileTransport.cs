@@ -29,6 +29,12 @@ public sealed class TcpFileTransport : IFileTransport
     public string LocalDeviceName { get; set; }
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
     public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long to wait for the FileRequest answer: the user on the other device has to accept the file.
+    /// Longer than the receiver's own approval timeout (60 s by default), so its "nobody answered" arrives first.
+    /// </summary>
+    public TimeSpan AcceptTimeout { get; set; } = TimeSpan.FromSeconds(90);
     public int ChunkSize { get; set; } = ProtocolSerializer.MaxChunkSize;
 
     public async Task<FileTransferResult> SendFileAsync(
@@ -74,11 +80,12 @@ public sealed class TcpFileTransport : IFileTransport
         try
         {
             await SendAsync(client, MessageType.Handshake, _serializer.BuildHandshakePayload(LocalDeviceName, Array.Empty<byte>()), ct);
-            await ExpectAsync(responses.Reader, MessageType.Handshake, ct);
+            await ExpectAsync(responses.Reader, MessageType.Handshake, ResponseTimeout, ct);
 
             await SendAsync(client, MessageType.FileRequest,
                 _serializer.BuildFileRequestPayload(transferId, file.Name, file.Length, 0, false, 0), ct);
-            await ExpectAckAsync(responses.Reader, MessageType.FileRequest, ct);
+            _logger?.LogInformation("Waiting for {Device} to accept {File}", target.Name, file.Name);
+            await ExpectAckAsync(responses.Reader, MessageType.FileRequest, AcceptTimeout, ct);
 
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long offset = 0;
@@ -108,7 +115,7 @@ public sealed class TcpFileTransport : IFileTransport
 
             var sha256 = hash.GetHashAndReset();
             await SendAsync(client, MessageType.TransferComplete, _serializer.BuildTransferCompletePayload(transferId, sha256), ct);
-            await ExpectAckAsync(responses.Reader, MessageType.TransferComplete, ct);
+            await ExpectAckAsync(responses.Reader, MessageType.TransferComplete, ResponseTimeout, ct);
 
             try { await SendAsync(client, MessageType.Disconnect, Array.Empty<byte>(), ct); } catch { /* best effort */ }
 
@@ -127,10 +134,10 @@ public sealed class TcpFileTransport : IFileTransport
     private Task SendAsync(TcpFileClient client, MessageType type, byte[] payload, CancellationToken ct) =>
         client.SendAsync(_serializer.Serialize(new ProtocolMessage { Type = type, Payload = payload }), ct);
 
-    private async Task<ProtocolMessage> ExpectAsync(ChannelReader<ProtocolMessage> reader, MessageType expected, CancellationToken ct)
+    private async Task<ProtocolMessage> ExpectAsync(ChannelReader<ProtocolMessage> reader, MessageType expected, TimeSpan wait, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(ResponseTimeout);
+        timeout.CancelAfter(wait);
         try
         {
             while (true)
@@ -149,7 +156,7 @@ public sealed class TcpFileTransport : IFileTransport
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException($"No {expected} response from the receiving device within {ResponseTimeout.TotalSeconds:0} s.");
+            throw new TimeoutException($"No {expected} response from the receiving device within {wait.TotalSeconds:0} s.");
         }
         catch (ChannelClosedException ex)
         {
@@ -157,11 +164,11 @@ public sealed class TcpFileTransport : IFileTransport
         }
     }
 
-    private async Task ExpectAckAsync(ChannelReader<ProtocolMessage> reader, MessageType acknowledged, CancellationToken ct)
+    private async Task ExpectAckAsync(ChannelReader<ProtocolMessage> reader, MessageType acknowledged, TimeSpan wait, CancellationToken ct)
     {
         while (true)
         {
-            var ack = await ExpectAsync(reader, MessageType.Ack, ct);
+            var ack = await ExpectAsync(reader, MessageType.Ack, wait, ct);
             var (messageId, status) = _serializer.ParseAckPayload(ack.Payload);
             if (messageId != (ulong)acknowledged)
                 continue; // an ACK for something else

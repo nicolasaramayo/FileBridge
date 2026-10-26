@@ -7,6 +7,12 @@ using FileBridge.UI.Services;
 
 namespace FileBridge.UI.ViewModels;
 
+/// <summary>
+/// App-wide status (registered as a singleton): it subscribes once to the singleton network services.
+/// As a transient, every MainPage re-creation (e.g. Android Back on the root page, then relaunch)
+/// left another live subscriber behind. MAUI bindings hold view models weakly, so a singleton does
+/// not keep old pages alive.
+/// </summary>
 public partial class MainViewModel : ViewModelBase
 {
     private readonly INavigationService _navigation;
@@ -53,6 +59,9 @@ public partial class MainViewModel : ViewModelBase
         receiver.ReceiveFailed += (_, e) => MainThread.BeginInvokeOnMainThread(() =>
             ReceiveStatus = $"✗ {e.FileName}: {e.Reason}");
 
+        // The server starts in the background; refresh when it is listening and after a network change.
+        _transfers.StatusChanged += (_, _) => MainThread.BeginInvokeOnMainThread(RefreshStatus);
+
         RefreshStatus();
     }
 
@@ -62,7 +71,7 @@ public partial class MainViewModel : ViewModelBase
         var port = _transfers.ListeningPort;
         if (port == 0)
         {
-            ListeningOn = "Server not running yet (pull to refresh; check the logs if it persists)";
+            ListeningOn = "Starting… (if this does not change, tap Refresh and check the logs)";
             return;
         }
 

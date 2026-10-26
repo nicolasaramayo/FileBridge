@@ -24,14 +24,13 @@ public class FileTransferIntegrationTests
         receiver.Receiver.FileReceived += (_, e) => received = e;
 
         var transport = new TcpFileTransport();
-        long lastProgress = 0;
-        var result = await transport.SendFileAsync(receiver.AsDevice(), source, Guid.NewGuid(),
-            new Progress<long>(b => lastProgress = b));
+        var progress = new SyncProgress();
+        var result = await transport.SendFileAsync(receiver.AsDevice(), source, Guid.NewGuid(), progress);
 
         var expectedSha = TestFiles.Sha256(source);
         var size = new FileInfo(source).Length;
         Assert.AreEqual(size, result.BytesSent);
-        Assert.IsTrue(await TestFiles.WaitUntilAsync(() => Interlocked.Read(ref lastProgress) == size), "Progress must reach 100%");
+        Assert.AreEqual(size, progress.Last, "Progress must reach 100%");
         Assert.AreEqual(expectedSha, result.Sha256);
         Assert.IsTrue(await TestFiles.WaitUntilAsync(() => received != null), "FileReceived was not raised");
         Assert.AreEqual("video.mp4", received!.FileName);

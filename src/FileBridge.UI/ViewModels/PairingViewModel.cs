@@ -39,7 +39,7 @@ public partial class PairingViewModel : ViewModelBase, IQueryAttributable
     /// <summary>Navigation parameters ("device", "code") arrive here; before, SetDevice was never called.</summary>
     public void ApplyQueryAttributes(IDictionary<string, object> query)
     {
-        if (query.TryGetValue("device", out var value) && value is DomainDevice device)
+        if (query.TryGetValue("device", out var value) && value is DomainDevice device && device.Id != _deviceToPair?.Id)
             SetDevice(device, query.TryGetValue("code", out var code) ? code as string : null);
     }
 

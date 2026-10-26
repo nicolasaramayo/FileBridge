@@ -57,4 +57,16 @@ public class NetworkHelpersTests
         Assert.AreEqual("received-file", FileReceiver.SanitizeFileName(".."));
         Assert.AreEqual("foto de año.jpg", FileReceiver.SanitizeFileName("foto de año.jpg"));
     }
+
+    [TestMethod]
+    public void SanitizeFileName_AvoidsWindowsDeviceNames()
+    {
+        // On Windows these are devices, not files: writing "nul.txt" loses the data.
+        Assert.AreEqual("_nul.txt", FileReceiver.SanitizeFileName("nul.txt"));
+        Assert.AreEqual("_CON", FileReceiver.SanitizeFileName("CON"));
+        Assert.AreEqual("_com1.log", FileReceiver.SanitizeFileName("com1.log"));
+        Assert.AreEqual("_LPT9.tar.gz", FileReceiver.SanitizeFileName("LPT9.tar.gz"));
+        Assert.AreEqual("console.txt", FileReceiver.SanitizeFileName("console.txt"));
+        Assert.AreEqual("nul2.txt", FileReceiver.SanitizeFileName("nul2.txt"));
+    }
 }

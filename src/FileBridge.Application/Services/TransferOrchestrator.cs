@@ -44,6 +44,11 @@ public class TransferOrchestrator : ITransferService
             if (job.TotalBytes <= 0 && File.Exists(job.LocalFilePath))
                 job.TotalBytes = new FileInfo(job.LocalFilePath).Length;
 
+            // Paused/cancelled before the cancellation source above was registered: stop here
+            // instead of overwriting that status with InProgress.
+            if (job.Status is TransferStatus.Cancelled or TransferStatus.Paused)
+                throw new OperationCanceledException();
+
             job.Status = TransferStatus.InProgress;
             var progress = new ThrottledProgress(this, job);
             progress.Report(0);

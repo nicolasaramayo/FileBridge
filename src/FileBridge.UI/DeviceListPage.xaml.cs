@@ -15,6 +15,21 @@ public partial class DeviceListPage : ContentPage
     // If neither provides it, partial methods are no-ops at runtime.
     partial void InitializeComponent();
 
+    protected override async void OnAppearing()
+    {
+        base.OnAppearing();
+        // mDNS scanning runs only while this page is visible (the view model catches its own errors).
+        if (BindingContext is DeviceListViewModel vm)
+            await vm.StartScanningAsync();
+    }
+
+    protected override async void OnDisappearing()
+    {
+        base.OnDisappearing();
+        if (BindingContext is DeviceListViewModel vm)
+            await vm.StopScanningAsync();
+    }
+
     private void OnDeviceTapped(object? sender, ItemTappedEventArgs e)
     {
         if (e.Item is Device device && BindingContext is DeviceListViewModel vm)

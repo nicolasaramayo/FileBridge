@@ -4,6 +4,7 @@ namespace FileBridge.Infrastructure.Network;
 public static class ProtocolErrorCodes
 {
     public const ushort BadRequest = 400;
+    public const ushort Forbidden = 403;
     public const ushort Conflict = 409;
     public const ushort IntegrityFailed = 422;
     public const ushort Internal = 500;

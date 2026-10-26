@@ -11,6 +11,13 @@ public class DeviceDiscoveryHostedService : FileBridgeHostedService
     private readonly ILogger<DeviceDiscoveryHostedService> _logger;
     private readonly Channel<Device> _deviceChannel;
 
+    /// <summary>
+    /// Discovery at startup only runs this long, so devices are already listed when the Devices page
+    /// opens without scanning every 10 s for as long as the process lives (battery). The Devices page
+    /// scans again while it is visible.
+    /// </summary>
+    public static TimeSpan InitialDiscoveryDuration { get; set; } = TimeSpan.FromMinutes(2);
+
     public DeviceDiscoveryHostedService(
         DeviceDiscoveryService discoveryService,
         ILogger<DeviceDiscoveryHostedService> logger)
@@ -29,9 +36,12 @@ public class DeviceDiscoveryHostedService : FileBridgeHostedService
     {
         _logger.LogInformation("Device discovery service starting");
 
+        using var initialRun = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        initialRun.CancelAfter(InitialDiscoveryDuration);
+
         try
         {
-            await _discoveryService.StartDiscoveryAsync(stoppingToken);
+            await _discoveryService.StartDiscoveryAsync(initialRun.Token);
 
             await foreach (var device in _discoveryService.GetDiscoveredDevicesAsync(stoppingToken))
             {
@@ -47,7 +57,7 @@ public class DeviceDiscoveryHostedService : FileBridgeHostedService
         finally
         {
             await _discoveryService.StopDiscoveryAsync();
-            _deviceChannel.Writer.Complete();
+            _deviceChannel.Writer.TryComplete();
         }
     }
 }

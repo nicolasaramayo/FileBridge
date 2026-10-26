@@ -16,8 +16,8 @@
             <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
                 <StackLayout Spacing="12">
                     <StackLayout>
-                        <Label Text="Server Port" FontSize="14" Opacity="0.7" />
-                        <Entry Text="{Binding ServerPort}" Keyboard="Numeric" Placeholder="45678" />
+                        <Label Text="Server Port (fixed at 45678 for now; this setting is not used yet)" FontSize="14" Opacity="0.7" />
+                        <Entry Text="{Binding ServerPort}" Keyboard="Numeric" Placeholder="45678" IsEnabled="False" />
                     </StackLayout>
                     
                     <StackLayout Orientation="Horizontal">
@@ -33,10 +33,11 @@
             <Frame Padding="12" CornerRadius="10" BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
                 <StackLayout>
                     <StackLayout Orientation="Horizontal">
-                        <Switch IsToggled="{Binding EncryptionEnabled}" />
+                        <!-- Disabled: transfers are not encrypted yet (pairing/key exchange is still a placeholder) -->
+                        <Switch IsToggled="{Binding EncryptionEnabled}" IsEnabled="False" />
                         <StackLayout VerticalOptions="Center">
                             <Label Text="Enable Encryption" FontSize="16" />
-                            <Label Text="Encrypt files during transfer (AES-256)" FontSize="12" Opacity="0.7" />
+                            <Label Text="Not implemented yet: files are sent unencrypted on the local network" FontSize="12" Opacity="0.7" />
                         </StackLayout>
                     </StackLayout>
                 </StackLayout>

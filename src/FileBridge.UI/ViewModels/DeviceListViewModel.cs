@@ -9,6 +9,11 @@ using DomainDevice = FileBridge.Domain.Entities.Device;
 
 namespace FileBridge.UI.ViewModels;
 
+/// <summary>
+/// Registered as a singleton: it subscribes once to the singleton registry/discovery (as a transient,
+/// every visit to the page left another live subscriber behind), and the list survives between visits.
+/// Scanning only runs while the page is visible (see DeviceListPage.OnAppearing/OnDisappearing).
+/// </summary>
 public partial class DeviceListViewModel : ViewModelBase
 {
     private const int DefaultPort = 45678;
@@ -46,6 +51,7 @@ public partial class DeviceListViewModel : ViewModelBase
 
         // Every discovered (DeviceDiscoveryService registers them) or manually added device goes through the registry.
         _registry.DeviceAddedOrUpdated += OnDeviceFound;
+        _registry.DeviceRemoved += OnDeviceLost; // replaced by a newer entry for the same IP:port
         _discoveryService.OnDeviceLost += OnDeviceLost;
     }
 
@@ -59,6 +65,23 @@ public partial class DeviceListViewModel : ViewModelBase
             else
                 Devices.Add(device);
         });
+    }
+
+    /// <summary>Called when the page appears: scan while the user is looking at the list.</summary>
+    public Task StartScanningAsync() => RefreshAsync();
+
+    /// <summary>Called when the page disappears: stop scanning (battery).</summary>
+    public async Task StopScanningAsync()
+    {
+        try
+        {
+            _discoveryCts?.Cancel();
+            await _discoveryService.StopDiscoveryAsync();
+        }
+        catch (Exception ex)
+        {
+            SetError(ex.Message);
+        }
     }
 
     private void OnDeviceLost(object? sender, DomainDevice device)

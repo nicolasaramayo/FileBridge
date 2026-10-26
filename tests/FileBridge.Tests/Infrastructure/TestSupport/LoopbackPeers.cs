@@ -8,7 +8,8 @@ namespace FileBridge.Tests.Infrastructure.TestSupport;
 
 /// <summary>
 /// A real receiving device on 127.0.0.1: TcpServer + ConnectionManager + FileReceiver,
-/// wired exactly like the app does, writing into a temporary folder.
+/// wired exactly like the app does, writing into a temporary folder. It accepts every
+/// incoming file unless a test replaces <see cref="FileReceiver.ApproveIncoming"/>.
 /// </summary>
 internal sealed class LoopbackReceiver : IAsyncDisposable
 {
@@ -26,16 +27,19 @@ internal sealed class LoopbackReceiver : IAsyncDisposable
     public ConnectionManager Connections { get; }
     public int Port => Server.Port;
 
-    public static async Task<LoopbackReceiver> StartAsync(string deviceName = "receiver")
+    public static async Task<LoopbackReceiver> StartAsync(string deviceName = "receiver", Action<FileBridgeOptions>? configure = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), "filebridge-tests", Guid.NewGuid().ToString("N"));
         var options = new FileBridgeOptions { DeviceName = deviceName, ReceivedFilesDirectory = directory, Port = 0 };
+        configure?.Invoke(options);
         var server = new TcpServer();
-        var receiver = new FileReceiver(options);
+        var receiver = new FileReceiver(options) { ApproveIncoming = AcceptAll };
         var connections = new ConnectionManager(server, new TcpFileClient(), receiver, options: options);
         await server.StartAsync(0);
         return new LoopbackReceiver(directory, server, receiver, connections);
     }
+
+    public static readonly Func<IncomingFileOffer, CancellationToken, Task<bool>> AcceptAll = (_, _) => Task.FromResult(true);
 
     public Device AsDevice(string name = "receiver") =>
         new() { Id = Guid.NewGuid(), Name = name, IpAddress = "127.0.0.1", Port = Port };
@@ -83,6 +87,14 @@ internal sealed class RawProtocolClient : IDisposable
     public Task CloseAsync() => _client.DisconnectAsync();
 
     public void Dispose() => _client.Dispose();
+}
+
+/// <summary>Records progress synchronously, in order (Progress&lt;T&gt; posts each report to the thread pool, so reports can arrive out of order).</summary>
+internal sealed class SyncProgress : IProgress<long>
+{
+    private long _last;
+    public long Last => Interlocked.Read(ref _last);
+    public void Report(long value) => Interlocked.Exchange(ref _last, value);
 }
 
 internal static class TestFiles

@@ -23,4 +23,7 @@ public sealed class FileBridgeOptions
 
     /// <summary>Largest incoming file accepted.</summary>
     public long MaxIncomingFileSize { get; set; } = 20L * 1024 * 1024 * 1024;
+
+    /// <summary>How long an incoming file waits for the user to accept it before it is declined.</summary>
+    public TimeSpan IncomingApprovalTimeout { get; set; } = TimeSpan.FromSeconds(60);
 }

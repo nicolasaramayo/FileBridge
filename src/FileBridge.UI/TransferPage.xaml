@@ -133,7 +133,7 @@
                      HorizontalOptions="Center" 
                      VerticalOptions="Center"
                      Spacing="12"
-                     IsVisible="{Binding ActiveTransfers.Count, Converter={StaticResource IsEmptyConverter}}">
+                     IsVisible="{Binding ShowEmptyState}">
             <Label Text="📤" FontSize="64" HorizontalOptions="Center" />
             <Label Text="No active transfers" FontSize="18" FontAttributes="Bold" HorizontalOptions="Center" />
             <Label Text="Send or receive files from a paired device" FontSize="14" Opacity="0.7" />

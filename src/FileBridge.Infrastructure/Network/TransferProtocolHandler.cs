@@ -100,6 +100,13 @@ public sealed class TransferProtocolHandler
             _receiver.Abort(client, $"Malformed {message.Type} message");
             await TrySendErrorAsync(client, ProtocolErrorCodes.BadRequest, $"Malformed {message.Type} message.", ct);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Anything else: drop this transfer, tell the sender, keep the connection usable.
+            _logger?.LogError(ex, "Unexpected error handling {Type}", message.Type);
+            _receiver.Abort(client, $"internal error: {ex.Message}");
+            await TrySendErrorAsync(client, ProtocolErrorCodes.Internal, "Internal error on the receiving device.", ct);
+        }
     }
 
     /// <summary>Called by the owner when the TCP connection ends.</summary>
@@ -140,8 +147,9 @@ public sealed class TransferProtocolHandler
         if (request.Resume || request.ResumeOffset != 0)
             throw new ProtocolException(ProtocolErrorCodes.NotImplemented, "Resuming a transfer is not implemented yet.");
 
+        // May wait for the user to accept the file (FileReceiver.ApproveIncoming); throws ProtocolException(403) if declined.
         await _receiver.BeginAsync(client, request.FileItemId, request.FileName, request.FileSize, GetPeerName(client), ct);
-        await SendAckAsync(client, MessageType.FileRequest, ct); // "ready, send the data"
+        await SendAckAsync(client, MessageType.FileRequest, ct); // "accepted, send the data"
     }
 
     private async Task HandleDataAsync(ProtocolMessage message, TcpClient client, CancellationToken ct)

@@ -29,16 +29,21 @@ public static class MauiProgram
 		builder.Services.AddFileBridgeInfrastructureServices(dbPath, options =>
 		{
 			options.DeviceName = GetDeviceName();
+			options.DeviceId = GetOrCreateDeviceId();
 			options.ReceivedFilesDirectory = GetReceivedFilesDirectory();
 		});
 		builder.Services.AddSingleton<INavigationService, NavigationService>();
 
-		// MAUI does not start IHostedService by itself (see HostedServicesStarter).
+		// Run at MauiApp.Build(), in this order. MAUI does not start IHostedService by itself (see HostedServicesStarter);
+		// the prompt is registered first so the server never runs without someone to ask (without it, every file is declined).
+		builder.Services.AddSingleton<IMauiInitializeService, IncomingTransferPrompt>();
+		builder.Services.AddSingleton<IMauiInitializeService, NetworkChangeWatcher>();
 		builder.Services.AddSingleton<IMauiInitializeService, HostedServicesStarter>();
 
-		// Register ViewModels
-		builder.Services.AddTransient<MainViewModel>();
-		builder.Services.AddTransient<DeviceListViewModel>();
+		// Register ViewModels. Main and DeviceList hold app-wide state and subscribe to singleton services,
+		// so they are singletons too (as transients, each page visit left a live subscriber behind).
+		builder.Services.AddSingleton<MainViewModel>();
+		builder.Services.AddSingleton<DeviceListViewModel>();
 		builder.Services.AddTransient<PairingViewModel>();
 		builder.Services.AddTransient<FileBrowserViewModel>();
 		builder.Services.AddTransient<TransferViewModel>();
@@ -71,12 +76,40 @@ public static class MauiProgram
 		return Environment.MachineName;
 	}
 
+	/// <summary>
+	/// Same id across restarts: with a new one per launch, every restart of a peer showed up as a new device.
+	/// </summary>
+	private static Guid GetOrCreateDeviceId()
+	{
+		const string key = "filebridge_device_id";
+		try
+		{
+			if (Guid.TryParse(Preferences.Default.Get(key, string.Empty), out var stored))
+				return stored;
+
+			var id = Guid.NewGuid();
+			Preferences.Default.Set(key, id.ToString());
+			return id;
+		}
+		catch
+		{
+			return Guid.NewGuid();
+		}
+	}
+
 	private static string GetReceivedFilesDirectory()
 	{
 #if WINDOWS
 		return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "FileBridge");
+#elif ANDROID
+		// App-specific external storage (Android/data/<package>/files/Download): no storage permission needed,
+		// reachable over USB, and MAUI's FileProvider can open files there directly. Files in the internal
+		// app folder are first copied synchronously on the UI thread by Launcher.OpenAsync (ANR on big files).
+		var downloads = global::Android.App.Application.Context.GetExternalFilesDir(global::Android.OS.Environment.DirectoryDownloads);
+		return downloads?.AbsolutePath is { Length: > 0 } path
+			? path
+			: Path.Combine(FileSystem.AppDataDirectory, "Received");
 #else
-		// App-private on Android (no storage permission needed). The main page shows the path and can open the last file.
 		return Path.Combine(FileSystem.AppDataDirectory, "Received");
 #endif
 	}

@@ -70,7 +70,9 @@ public class AppWiringTests
             Assert.IsTrue(await TestFiles.WaitUntilAsync(() => pcBackground.ListeningPort > 0), "PC server did not start");
 
             FileReceivedEventArgs? received = null;
-            pc.GetRequiredService<FileReceiver>().FileReceived += (_, e) => received = e;
+            var pcReceiver = pc.GetRequiredService<FileReceiver>();
+            pcReceiver.ApproveIncoming = LoopbackReceiver.AcceptAll; // the app asks the user here
+            pcReceiver.FileReceived += (_, e) => received = e;
 
             var phoneBackground = phone.GetRequiredService<ITransferBackgroundService>();
             var completed = new TaskCompletionSource<string>();

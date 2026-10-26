@@ -17,15 +17,30 @@ public interface ITransferBackgroundService
 {
     Task<string> QueueUploadAsync(FileItem file, Device targetDevice);
     Task<string> QueueDownloadAsync(string remoteFileId, Device sourceDevice, string localPath);
+
+    /// <summary>Stops a queued or running transfer; it stays paused until <see cref="ResumeAsync"/>.</summary>
     Task PauseAsync(string jobId);
+
+    /// <summary>Queues a paused transfer again. It restarts from the beginning (the protocol has no resume yet).</summary>
     Task ResumeAsync(string jobId);
+
+    /// <summary>Cancels a transfer; <see cref="OnTransferFailed"/> reports it as cancelled.</summary>
     Task CancelAsync(string jobId);
+
     ChannelReader<(TransferJob Job, TransferProgressDto Progress)> ProgressChannel { get; }
     event EventHandler<TransferCompletedEvent>? OnTransferCompleted;
+
+    /// <summary>A transfer ended without completing (failed or cancelled).</summary>
     event EventHandler<TransferFailedEvent>? OnTransferFailed;
+
+    /// <summary>The server started or this device was announced again (e.g. after a network change).</summary>
+    event EventHandler? StatusChanged;
 
     /// <summary>Port the transfer server is listening on (0 while not started).</summary>
     int ListeningPort { get; }
+
+    /// <summary>Announces this device again over mDNS, e.g. after the Wi-Fi network or the IP changed.</summary>
+    Task RestartAdvertisingAsync();
 }
 
 public class TransferBackgroundService : FileBridgeHostedService, ITransferBackgroundService
@@ -34,12 +49,13 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
     private readonly TcpServer _tcpServer;
     private readonly ILogger<TransferBackgroundService> _logger;
     private readonly Channel<(TransferJob Job, TransferProgressDto Progress)> _progressChannel;
-    private readonly SemaphoreSlim _queueSemaphore = new(1, 1);
-    private readonly Queue<TransferJob> _transferQueue = new();
-    // Restored: f1415d8 replaced this declaration with _advertiser and the project stopped compiling (CS0103).
+    // The queue loop waits on this channel instead of polling every 100 ms.
+    private readonly Channel<TransferJob> _queue = Channel.CreateUnbounded<TransferJob>(new UnboundedChannelOptions { SingleReader = true });
+    // f1415d8 replaced this declaration with _advertiser and the project stopped compiling (CS0103).
     // Concurrent because it is touched from the UI thread, the queue loop and progress callbacks.
     private readonly ConcurrentDictionary<string, TransferJob> _activeJobs = new();
     private readonly ZeroconfAdvertiser _advertiser;
+    private readonly SemaphoreSlim _advertiseLock = new(1, 1);
     private readonly IDeviceRegistry _devices;
     private readonly FileBridgeOptions _options;
 
@@ -47,6 +63,7 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
 
     public event EventHandler<TransferCompletedEvent>? OnTransferCompleted;
     public event EventHandler<TransferFailedEvent>? OnTransferFailed;
+    public event EventHandler? StatusChanged;
 
     public int ListeningPort => _tcpServer.IsRunning ? _tcpServer.Port : 0;
 
@@ -94,104 +111,135 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         _progressChannel.Writer.TryWrite((job, dto));
     }
 
-    public async Task<string> QueueUploadAsync(FileItem file, Device targetDevice)
+    public Task<string> QueueUploadAsync(FileItem file, Device targetDevice)
     {
         // The orchestrator resolves the target by DeviceId: make sure this device is known.
         _devices.AddOrUpdate(targetDevice);
 
-        await _queueSemaphore.WaitAsync();
-        try
+        var job = new TransferJob
         {
-            var job = new TransferJob
-            {
-                Id = Guid.NewGuid(),
-                FileItemId = file.Id,
-                DeviceId = targetDevice.Id,
-                LocalFilePath = file.FilePath,
-                Direction = TransferDirection.Send,
-                Status = TransferStatus.Pending,
-                TotalBytes = file.FileSize,
-                ChunkSize = 65536,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
+            Id = Guid.NewGuid(),
+            FileItemId = file.Id,
+            DeviceId = targetDevice.Id,
+            LocalFilePath = file.FilePath,
+            Direction = TransferDirection.Send,
+            Status = TransferStatus.Pending,
+            TotalBytes = file.FileSize,
+            ChunkSize = 65536,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
 
-            _transferQueue.Enqueue(job);
-            _activeJobs[job.Id.ToString()] = job;
-
-            _logger.LogInformation("Queued upload: {FileName} to {DeviceName}", file.FileName, targetDevice.Name);
-            return job.Id.ToString();
-        }
-        finally
-        {
-            _queueSemaphore.Release();
-        }
+        Enqueue(job);
+        _logger.LogInformation("Queued upload: {FileName} to {DeviceName}", file.FileName, targetDevice.Name);
+        return Task.FromResult(job.Id.ToString());
     }
 
-    public async Task<string> QueueDownloadAsync(string remoteFileId, Device sourceDevice, string localPath)
+    public Task<string> QueueDownloadAsync(string remoteFileId, Device sourceDevice, string localPath)
     {
-        await _queueSemaphore.WaitAsync();
-        try
+        var job = new TransferJob
         {
-            var job = new TransferJob
-            {
-                Id = Guid.NewGuid(),
-                DeviceId = sourceDevice.Id,
-                RemoteFilePath = remoteFileId,
-                LocalFilePath = localPath,
-                Direction = TransferDirection.Receive,
-                Status = TransferStatus.Pending,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
+            Id = Guid.NewGuid(),
+            DeviceId = sourceDevice.Id,
+            RemoteFilePath = remoteFileId,
+            LocalFilePath = localPath,
+            Direction = TransferDirection.Receive,
+            Status = TransferStatus.Pending,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
 
-            _transferQueue.Enqueue(job);
-            _activeJobs[job.Id.ToString()] = job;
+        Enqueue(job);
+        _logger.LogInformation("Queued download: {RemoteFileId} from {DeviceName}", remoteFileId, sourceDevice.Name);
+        return Task.FromResult(job.Id.ToString());
+    }
 
-            _logger.LogInformation("Queued download: {RemoteFileId} from {DeviceName}", remoteFileId, sourceDevice.Name);
-            return job.Id.ToString();
-        }
-        finally
-        {
-            _queueSemaphore.Release();
-        }
+    private void Enqueue(TransferJob job)
+    {
+        _activeJobs[job.Id.ToString()] = job;
+        if (!_queue.Writer.TryWrite(job))
+            throw new InvalidOperationException("The transfer service is stopped.");
     }
 
     public async Task PauseAsync(string jobId)
     {
-        if (_activeJobs.TryGetValue(jobId, out var job))
+        if (!_activeJobs.TryGetValue(jobId, out var job))
+            return;
+
+        if (job.Status is TransferStatus.Pending or TransferStatus.InProgress)
         {
             job.Status = TransferStatus.Paused;
-            await _orchestrator.PauseAsync(jobId);
+            await _orchestrator.PauseAsync(jobId); // cancels the attempt if it is running
             _logger.LogInformation("Paused transfer: {JobId}", jobId);
         }
     }
 
     public Task ResumeAsync(string jobId)
     {
-        if (_activeJobs.TryGetValue(jobId, out var job))
+        if (_activeJobs.TryGetValue(jobId, out var job) && job.Status == TransferStatus.Paused)
         {
-            job.Status = TransferStatus.InProgress;
-            _logger.LogInformation("Resumed transfer: {JobId}", jobId);
+            job.Status = TransferStatus.Pending;
+            job.TransferredBytes = 0;
+            job.ResumeToken = null;
+            if (_queue.Writer.TryWrite(job))
+                _logger.LogInformation("Resumed transfer: {JobId} (restarts from the beginning)", jobId);
         }
         return Task.CompletedTask;
     }
 
     public async Task CancelAsync(string jobId)
     {
-        if (_activeJobs.TryGetValue(jobId, out var job))
+        if (!_activeJobs.TryGetValue(jobId, out var job))
+            return;
+
+        var previous = job.Status;
+        job.Status = TransferStatus.Cancelled;
+        _logger.LogInformation("Cancelling transfer: {JobId}", jobId);
+
+        switch (previous)
         {
-            job.Status = TransferStatus.Cancelled;
-            await _orchestrator.CancelAsync(jobId);
-            _activeJobs.TryRemove(jobId, out _);
-            _logger.LogInformation("Cancelled transfer: {JobId}", jobId);
+            case TransferStatus.InProgress:
+                await _orchestrator.CancelAsync(jobId); // the queue loop reports it when the attempt unwinds
+                break;
+            case TransferStatus.Paused:
+                // Not queued and not running: report it now.
+                _activeJobs.TryRemove(jobId, out _);
+                RaiseFailed(job, FileNameOf(job), "Cancelled");
+                break;
+            // Pending: still in the queue; the queue loop reports it when it gets there.
         }
+    }
+
+    public async Task RestartAdvertisingAsync()
+    {
+        if (!_tcpServer.IsRunning)
+            return;
+
+        await _advertiseLock.WaitAsync();
+        try
+        {
+            await _advertiser.StopAdvertisingAsync();
+            await _advertiser.StartAdvertisingAsync(_options.DeviceName, _tcpServer.Port, _options.DeviceId.ToString());
+            _logger.LogInformation("mDNS advertising restarted");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not restart mDNS advertising");
+        }
+        finally
+        {
+            _advertiseLock.Release();
+        }
+
+        RaiseStatusChanged();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await StartServerAsync(stoppingToken);
+        RaiseStatusChanged();
 
         // Start mDNS advertising. If it fails (no multicast on this network, missing Android
         // MulticastLock...), keep going: the server still works and devices can be added by IP.
+        await _advertiseLock.WaitAsync(stoppingToken);
         try
         {
             await _advertiser.StartAdvertisingAsync(_options.DeviceName, _tcpServer.Port, _options.DeviceId.ToString(), stoppingToken);
@@ -200,34 +248,25 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         {
             _logger.LogWarning(ex, "mDNS advertising failed; this device will only be reachable by IP:port");
         }
+        finally
+        {
+            _advertiseLock.Release();
+        }
 
         try
         {
-            while (!stoppingToken.IsCancellationRequested)
+            await foreach (var job in _queue.Reader.ReadAllAsync(stoppingToken))
             {
-                TransferJob? job = null;
-
-                await _queueSemaphore.WaitAsync(stoppingToken);
-                try
-                {
-                    if (_transferQueue.Count > 0)
-                        job = _transferQueue.Dequeue();
-                }
-                finally
-                {
-                    _queueSemaphore.Release();
-                }
-
-                if (job != null)
-                {
-                    await ProcessJobAsync(job, stoppingToken);
-                }
-
-                await Task.Delay(100, stoppingToken);
+                await ProcessJobAsync(job, stoppingToken);
             }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // shutting down
         }
         finally
         {
+            try { await _advertiser.StopAdvertisingAsync(); } catch { /* best effort */ }
             await _tcpServer.StopAsync();
             _logger.LogInformation("TCP transfer server stopped");
         }
@@ -251,11 +290,22 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
 
     private async Task ProcessJobAsync(TransferJob job, CancellationToken stoppingToken)
     {
+        var key = job.Id.ToString();
+        var fileName = FileNameOf(job);
+
+        if (job.Status == TransferStatus.Cancelled)
+        {
+            // Cancelled while it was waiting in the queue.
+            _activeJobs.TryRemove(key, out _);
+            RaiseFailed(job, fileName, "Cancelled");
+            return;
+        }
+
+        if (job.Status != TransferStatus.Pending)
+            return; // paused while queued (kept for ResumeAsync), or a duplicate entry after a resume
+
         try
         {
-            if (job.Status == TransferStatus.Cancelled)
-                return;
-
             job.Status = TransferStatus.InProgress;
 
             if (job.Direction == TransferDirection.Send)
@@ -266,48 +316,86 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
             {
                 await _orchestrator.ReceiveFileAsync(job, stoppingToken);
             }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+        {
+            job.Status = TransferStatus.Failed;
+            job.ErrorMessage = ex.Message;
+        }
 
-            var fileName = Path.GetFileName(job.LocalFilePath ?? job.RemoteFilePath ?? string.Empty);
-            if (job.Status == TransferStatus.Completed)
-            {
-                OnTransferCompleted?.Invoke(this, new TransferCompletedEvent(
-                    job.Id.ToString(),
+        switch (job.Status)
+        {
+            case TransferStatus.Completed:
+                _activeJobs.TryRemove(key, out _);
+                _logger.LogInformation("Transfer completed: {JobId}", job.Id);
+                Raise(OnTransferCompleted, new TransferCompletedEvent(
+                    key,
                     fileName,
                     job.DeviceId.ToString(),
                     job.CompletedAt ?? DateTimeOffset.UtcNow,
                     job.TotalBytes,
                     null));
+                break;
 
-                _logger.LogInformation("Transfer completed: {JobId}", job.Id);
-            }
-            else if (job.Status == TransferStatus.Failed)
-            {
+            case TransferStatus.Paused:
+                // Stays in _activeJobs so ResumeAsync can queue it again.
+                _logger.LogInformation("Transfer paused: {JobId}", job.Id);
+                break;
+
+            case TransferStatus.Pending:
+                // Resumed while the paused attempt was unwinding: it is already queued again.
+                break;
+
+            case TransferStatus.Cancelled:
+                _activeJobs.TryRemove(key, out _);
+                RaiseFailed(job, fileName, "Cancelled");
+                break;
+
+            default:
                 // Before, a failed job was dropped without telling anyone.
-                RaiseFailed(job, fileName);
-            }
-        }
-        catch (Exception ex)
-        {
-            job.Status = TransferStatus.Failed;
-            job.ErrorMessage = ex.Message;
-            RaiseFailed(job, Path.GetFileName(job.LocalFilePath ?? job.RemoteFilePath ?? string.Empty));
-        }
-        finally
-        {
-            _activeJobs.TryRemove(job.Id.ToString(), out _);
+                _activeJobs.TryRemove(key, out _);
+                RaiseFailed(job, fileName, job.ErrorMessage ?? "Unknown error");
+                break;
         }
     }
 
-    private void RaiseFailed(TransferJob job, string fileName)
+    private static string FileNameOf(TransferJob job) =>
+        Path.GetFileName(job.LocalFilePath ?? job.RemoteFilePath ?? string.Empty);
+
+    private void RaiseFailed(TransferJob job, string fileName, string reason)
     {
-        _logger.LogWarning("Transfer failed: {JobId} ({File}): {Error}", job.Id, fileName, job.ErrorMessage);
-        OnTransferFailed?.Invoke(this, new TransferFailedEvent(
+        _logger.LogWarning("Transfer did not complete: {JobId} ({File}): {Reason}", job.Id, fileName, reason);
+        Raise(OnTransferFailed, new TransferFailedEvent(
             job.Id.ToString(),
             fileName,
             job.DeviceId.ToString(),
             DateTimeOffset.UtcNow,
             job.TransferredBytes,
             job.TotalBytes,
-            job.ErrorMessage ?? "Unknown error"));
+            reason));
+    }
+
+    private void RaiseStatusChanged()
+    {
+        var handler = StatusChanged;
+        if (handler is null)
+            return;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            try { ((EventHandler)subscriber)(this, EventArgs.Empty); }
+            catch (Exception ex) { _logger.LogWarning(ex, "A StatusChanged subscriber threw"); }
+        }
+    }
+
+    /// <summary>A UI subscriber that throws must not stop the queue loop.</summary>
+    private void Raise<T>(EventHandler<T>? handler, T args)
+    {
+        if (handler is null)
+            return;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            try { ((EventHandler<T>)subscriber)(this, args); }
+            catch (Exception ex) { _logger.LogWarning(ex, "A transfer event subscriber threw"); }
+        }
     }
 }
