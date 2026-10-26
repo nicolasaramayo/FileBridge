@@ -32,9 +32,13 @@ public sealed class ProtocolSerializer
         return ms.ToArray();
     }
 
+    // Header: Version(1) + Type(1) + Flags(2) + Length(4) = 8 bytes; trailer: CRC32(4).
+    private const int HeaderSize = 8;
+    private const int ChecksumSize = 4;
+
     public ProtocolMessage? Deserialize(byte[] data)
     {
-        if (data.Length < 9) // min header size (1+1+2+4+1=9)
+        if (data.Length < HeaderSize + ChecksumSize)
             return null;
 
         using var ms = new MemoryStream(data);
@@ -49,8 +53,7 @@ public sealed class ProtocolSerializer
         var length = reader.ReadInt32();
 
         // Validate length
-        var remaining = data.Length - 9;
-        if (length > remaining)
+        if (length < 0 || length != data.Length - HeaderSize - ChecksumSize)
             return null;
 
         var payload = length > 0 ? reader.ReadBytes(length) : Array.Empty<byte>();
@@ -78,7 +81,7 @@ public sealed class ProtocolSerializer
         using var writer = new BinaryWriter(ms);
         writer.Write(ProtocolVersion);
 
-        var nameBytes = Encoding.UTF8.GetBytes(deviceName);
+        var nameBytes = Utf8Max(deviceName, byte.MaxValue); // length is stored in one byte
         writer.Write((byte)nameBytes.Length);
         writer.Write(nameBytes);
         writer.Write(publicKey);
@@ -147,6 +150,46 @@ public sealed class ProtocolSerializer
         writer.Write(resumeOffset);
 
         return ms.ToArray();
+    }
+
+    // FileRequest layout: FileItemId(16) + FileName(UTF-8, no length) + FileSize(8) + ChunkIndex(4) + Resume(1) + ResumeOffset(8)
+    private const int FileRequestFixedSize = 16 + 8 + 4 + 1 + 8;
+
+    public (Guid FileItemId, string FileName, long FileSize, int ChunkIndex, bool Resume, long ResumeOffset) ParseFileRequestPayload(byte[] payload)
+    {
+        if (payload.Length < FileRequestFixedSize)
+            throw new InvalidDataException("FileRequest payload is too short.");
+
+        using var ms = new MemoryStream(payload);
+        using var reader = new BinaryReader(ms);
+
+        var fileItemId = new Guid(reader.ReadBytes(16));
+        var fileName = Encoding.UTF8.GetString(reader.ReadBytes(payload.Length - FileRequestFixedSize));
+        var fileSize = reader.ReadInt64();
+        var chunkIndex = reader.ReadInt32();
+        var resume = reader.ReadByte() != 0;
+        var resumeOffset = reader.ReadInt64();
+
+        return (fileItemId, fileName, fileSize, chunkIndex, resume, resumeOffset);
+    }
+
+    public byte[] BuildTransferCompletePayload(Guid fileItemId, byte[] sha256)
+    {
+        if (sha256.Length != 32)
+            throw new ArgumentException("SHA-256 must be 32 bytes.", nameof(sha256));
+
+        var payload = new byte[16 + 32];
+        fileItemId.ToByteArray().CopyTo(payload, 0);
+        sha256.CopyTo(payload, 16);
+        return payload;
+    }
+
+    public (Guid FileItemId, byte[] Sha256) ParseTransferCompletePayload(byte[] payload)
+    {
+        if (payload.Length != 16 + 32)
+            throw new InvalidDataException("TransferComplete payload must be 48 bytes.");
+
+        return (new Guid(payload.AsSpan(0, 16)), payload.AsSpan(16, 32).ToArray());
     }
 
     public byte[] BuildDataPayload(int chunkIndex, long offset, ReadOnlySpan<byte> data)
@@ -240,11 +283,36 @@ public sealed class ProtocolSerializer
         using var writer = new BinaryWriter(ms);
 
         writer.Write(code);
-        var msgBytes = Encoding.UTF8.GetBytes(message);
+        var msgBytes = Utf8Max(message, byte.MaxValue); // length is stored in one byte
         writer.Write((byte)msgBytes.Length);
         writer.Write(msgBytes);
 
         return ms.ToArray();
+    }
+
+    public (ushort Code, string Message) ParseErrorPayload(byte[] payload)
+    {
+        using var ms = new MemoryStream(payload);
+        using var reader = new BinaryReader(ms);
+
+        var code = reader.ReadUInt16();
+        var msgLen = reader.ReadByte();
+        var message = Encoding.UTF8.GetString(reader.ReadBytes(msgLen));
+
+        return (code, message);
+    }
+
+    /// <summary>UTF-8 bytes of <paramref name="text"/>, cut at a character boundary so they fit in <paramref name="maxBytes"/>.</summary>
+    private static byte[] Utf8Max(string text, int maxBytes)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text ?? string.Empty);
+        if (bytes.Length <= maxBytes)
+            return bytes;
+
+        var length = maxBytes;
+        while (length > 0 && (bytes[length] & 0xC0) == 0x80) // do not split a multi-byte character
+            length--;
+        return bytes.AsSpan(0, length).ToArray();
     }
 }
 

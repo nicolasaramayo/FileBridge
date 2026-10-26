@@ -24,7 +24,7 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
     public event EventHandler<Device>? OnDeviceFound;
     public event EventHandler<Device>? OnDeviceLost;
 
-    public ZeroconfAdvertiser(ILogger? logger = null)
+    public ZeroconfAdvertiser(ILogger<ZeroconfAdvertiser>? logger = null)
     {
         _logger = logger;
     }
@@ -54,11 +54,11 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
             _mdns = new MulticastService();
             _sd = new ServiceDiscovery(_mdns);
             
-            // Name must be unique on network
-            string instanceName = $"{_deviceName}-{_deviceId}".Replace(" ", "-");
+            // Name must be unique on network and a valid DNS label (<= 63 bytes, no dots).
+            string instanceName = BuildInstanceName(_deviceName, _deviceId);
             
             _profile = new ServiceProfile(instanceName, ServiceType, (ushort)_port);
-            _profile.AddProperty("name", _deviceName);
+            _profile.AddProperty("name", _deviceName.Length > 100 ? _deviceName[..100] : _deviceName);
             _profile.AddProperty("port", _port.ToString());
             _profile.AddProperty("version", "1");
             _profile.AddProperty("deviceId", _deviceId);
@@ -72,7 +72,7 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.LogInformation("Failed to start mDNS advertiser", ex.ToString());
+            _logger?.LogError(ex, "Failed to start mDNS advertiser");
             throw;
         }
 
@@ -118,6 +118,29 @@ public sealed class ZeroconfAdvertiser : IDiscoveryService, IDisposable
     {
         await Task.CompletedTask;
         yield break;
+    }
+
+    /// <summary>
+    /// "{name}-{deviceId}" as a single DNS label: only ASCII letters/digits/'-', at most 63 bytes.
+    /// A device name with dots, accents or more than ~26 characters (common on phones) produced an
+    /// invalid label before.
+    /// </summary>
+    public static string BuildInstanceName(string? deviceName, string deviceId)
+    {
+        const int MaxLabelLength = 63;
+        var cleaned = new string((deviceName ?? string.Empty)
+            .Select(c => c < 128 && char.IsLetterOrDigit(c) ? c : '-')
+            .ToArray()).Trim('-');
+        if (cleaned.Length == 0)
+            cleaned = "FileBridge";
+
+        var maxNameLength = MaxLabelLength - 1 - deviceId.Length;
+        if (maxNameLength < 1)
+            return deviceId.Length <= MaxLabelLength ? deviceId : deviceId[..MaxLabelLength];
+        if (cleaned.Length > maxNameLength)
+            cleaned = cleaned[..maxNameLength].TrimEnd('-');
+
+        return $"{cleaned}-{deviceId}";
     }
 
     public void Dispose()

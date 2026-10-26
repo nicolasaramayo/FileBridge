@@ -1,14 +1,16 @@
 namespace FileBridge.Infrastructure.Network;
 
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using FileBridge.Domain.Entities;
+using Microsoft.Extensions.Logging;
 
 public sealed class TcpServer : IDisposable
 {
     private System.Net.Sockets.TcpListener? _listener;
     private readonly List<TcpClient> _clients = new();
+    private readonly ConcurrentDictionary<TcpClient, SemaphoreSlim> _writeLocks = new();
     private CancellationTokenSource? _cts;
     private bool _disposed;
     private readonly object _clientsLock = new();
@@ -21,30 +23,39 @@ public sealed class TcpServer : IDisposable
     public event EventHandler<ClientDisconnectedEventArgs>? OnClientDisconnected;
     public event EventHandler<DataReceivedEventArgs>? OnDataReceived;
 
-    public TcpServer(ILogger? logger = null)
+    /// <summary>
+    /// Processes each received frame. Unlike <see cref="OnDataReceived"/>, it is awaited before the next
+    /// frame of the same connection is read, which keeps chunks in order and gives TCP back-pressure
+    /// (a slow disk slows the sender down instead of piling chunks up in memory).
+    /// </summary>
+    public Func<TcpClient, byte[], CancellationToken, Task>? FrameHandler { get; set; }
+
+    public TcpServer(ILogger<TcpServer>? logger = null)
     {
         _logger = logger;
     }
 
-    public async Task StartAsync(int port = 0, CancellationToken ct = default)
+    public Task StartAsync(int port = 0, CancellationToken ct = default)
     {
         if (IsRunning)
             throw new InvalidOperationException("Server already running");
 
-        _listener = new System.Net.Sockets.TcpListener(IPAddress.Any, port);
-        _listener.Start();
-        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Any, port);
+        listener.Start(); // throws SocketException (AddressAlreadyInUse) if the port is taken
+        _listener = listener;
+        Port = ((IPEndPoint)listener.LocalEndpoint).Port;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         IsRunning = true;
 
         _logger?.LogInformation("TCP server started on port {Port}", Port);
         _ = AcceptClientsAsync(_cts.Token);
+        return Task.CompletedTask;
     }
 
-    public async Task StopAsync()
+    public Task StopAsync()
     {
         if (!IsRunning)
-            return;
+            return Task.CompletedTask;
 
         IsRunning = false;
         _cts?.Cancel();
@@ -67,6 +78,7 @@ public sealed class TcpServer : IDisposable
         _listener = null;
 
         _logger?.LogInformation("TCP server stopped");
+        return Task.CompletedTask;
     }
 
     public async Task BroadcastAsync(byte[] data, CancellationToken ct = default)
@@ -93,6 +105,7 @@ public sealed class TcpServer : IDisposable
         RemoveDeadClients(deadClients);
     }
 
+    /// <summary>Sends one frame (a serialized <see cref="ProtocolMessage"/>) to an accepted client.</summary>
     public async Task SendToClientAsync(TcpClient client, byte[] data, CancellationToken ct = default)
     {
         await SendToClientInternalAsync(client, data, ct);
@@ -103,9 +116,18 @@ public sealed class TcpServer : IDisposable
         if (!client.Connected)
             throw new IOException("Client is not connected");
 
-        var stream = client.GetStream();
-        await stream.WriteAsync(data.AsMemory(), ct);
-        await stream.FlushAsync(ct);
+        // Same framing as TcpFileClient (length prefix). Writes on one connection are serialized
+        // so two replies can never interleave their bytes.
+        var writeLock = _writeLocks.GetOrAdd(client, _ => new SemaphoreSlim(1, 1));
+        await writeLock.WaitAsync(ct);
+        try
+        {
+            await FrameIO.WriteFrameAsync(client.GetStream(), data, ct);
+        }
+        finally
+        {
+            writeLock.Release();
+        }
     }
 
     private async Task AcceptClientsAsync(CancellationToken ct)
@@ -122,12 +144,16 @@ public sealed class TcpServer : IDisposable
                     _clients.Add(client);
                 }
 
-                OnClientConnected?.Invoke(this, new ClientConnectedEventArgs(client));
                 _logger?.LogInformation("Client connected from {Endpoint}", client.Client.RemoteEndPoint);
+                OnClientConnected?.Invoke(this, new ClientConnectedEventArgs(client));
 
                 _ = HandleClientAsync(client, ct);
             }
             catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -144,29 +170,29 @@ public sealed class TcpServer : IDisposable
         try
         {
             var stream = client.GetStream();
-            var buffer = new byte[8192];
 
             while (!ct.IsCancellationRequested && client.Connected)
             {
-                // Read length prefix (4 bytes)
-                var lengthBuffer = await ReadExactAsync(stream, 4, ct);
-                if (lengthBuffer == null)
-                    break;
+                var frame = await FrameIO.ReadFrameAsync(stream, ct);
+                if (frame == null)
+                    break; // peer closed the connection
 
-                var length = BitConverter.ToInt32(lengthBuffer, 0);
-                if (length <= 0 || length > 10 * 1024 * 1024) // Max 10MB
-                    break;
+                OnDataReceived?.Invoke(this, new DataReceivedEventArgs(client, frame));
 
-                // Read payload
-                var payload = await ReadExactAsync(stream, length, ct);
-                if (payload == null)
-                    break;
-
-                OnDataReceived?.Invoke(this, new DataReceivedEventArgs(client, payload));
+                var handler = FrameHandler;
+                if (handler != null)
+                    await handler(client, frame, ct);
             }
         }
         catch (OperationCanceledException) { }
-        catch (IOException) { }
+        catch (InvalidDataException ex)
+        {
+            _logger?.LogWarning("Closing {Endpoint}: {Reason}", remoteEndpoint, ex.Message);
+        }
+        catch (IOException ex)
+        {
+            _logger?.LogInformation("Connection {Endpoint} closed: {Reason}", remoteEndpoint, ex.Message);
+        }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Error handling client {Endpoint}", remoteEndpoint);
@@ -179,26 +205,12 @@ public sealed class TcpServer : IDisposable
             }
 
             try { client.Close(); } catch { /* ignore */ }
+            if (_writeLocks.TryRemove(client, out var writeLock))
+                writeLock.Dispose();
+
             OnClientDisconnected?.Invoke(this, new ClientDisconnectedEventArgs(client));
             _logger?.LogInformation("Client disconnected: {Endpoint}", remoteEndpoint);
         }
-    }
-
-    private static async Task<byte[]?> ReadExactAsync(NetworkStream stream, int count, CancellationToken ct)
-    {
-        var buffer = new byte[count];
-        var totalRead = 0;
-
-        while (totalRead < count)
-        {
-            var read = await stream.ReadAsync(buffer.AsMemory(totalRead, count - totalRead), ct);
-            if (read == 0)
-                return null; // Connection closed
-
-            totalRead += read;
-        }
-
-        return buffer;
     }
 
     private void RemoveDeadClients(List<TcpClient> deadClients)
@@ -255,11 +267,4 @@ public sealed class DataReceivedEventArgs : EventArgs
         Client = client;
         Data = data;
     }
-}
-
-public interface ILogger
-{
-    void LogInformation(string message, params object[] args);
-    void LogWarning(Exception? ex, string message, params object[] args);
-    void LogWarning(string message, params object[] args);
 }

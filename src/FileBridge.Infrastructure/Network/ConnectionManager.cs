@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using FileBridge.Domain.Entities;
 using FileBridge.Domain.Enums;
 using FileBridge.Domain.Interfaces;
+using Microsoft.Extensions.Logging;
 
 public sealed class ConnectionManager : IDisposable
 {
@@ -16,6 +17,8 @@ public sealed class ConnectionManager : IDisposable
     private readonly ITransferService? _transferService;
     private readonly ILogger? _logger;
     private readonly TransferProtocolHandler _handler;
+    private readonly string _localDeviceName;
+    private readonly Func<TcpClient, byte[], CancellationToken, Task> _frameHandler;
     private readonly object _lock = new();
     private bool _disposed;
 
@@ -30,18 +33,30 @@ public sealed class ConnectionManager : IDisposable
         }
     }
 
-    public ConnectionManager(TcpServer server, TcpFileClient client, ITransferService? transferService = null, ILogger? logger = null)
+    public ConnectionManager(
+        TcpServer server,
+        TcpFileClient client,
+        FileReceiver receiver,
+        ITransferService? transferService = null,
+        ILogger<ConnectionManager>? logger = null,
+        FileBridgeOptions? options = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        ArgumentNullException.ThrowIfNull(receiver);
         _transferService = transferService;
         _logger = logger;
+        _localDeviceName = options?.DeviceName ?? Environment.MachineName;
         _serializer = new ProtocolSerializer();
-        _handler = new TransferProtocolHandler(_serializer, _transferService, _logger);
+        _handler = new TransferProtocolHandler(_serializer, _server, receiver, _transferService, _logger, _localDeviceName);
 
         _server.OnClientConnected += OnServerClientConnected;
         _server.OnClientDisconnected += OnServerClientDisconnected;
-        _server.OnDataReceived += OnServerDataReceived;
+        // Incoming frames are processed in order, one at a time per connection (see TcpServer.FrameHandler).
+        _frameHandler = HandleServerFrameAsync;
+        _server.FrameHandler = _frameHandler;
+        // Replies to our outbound connection (handshake answer, ACKs, errors) were silently dropped before.
+        _client.OnDataReceived += OnClientDataReceived;
     }
 
     public async Task<bool> ConnectToDeviceAsync(Device device, CancellationToken ct = default)
@@ -54,9 +69,7 @@ public sealed class ConnectionManager : IDisposable
             await _client.ConnectAsync(device.IpAddress, device.Port, ct);
 
             // Send handshake
-            var handshakePayload = _serializer.BuildHandshakePayload(
-                Environment.MachineName,
-                Array.Empty<byte>());
+            var handshakePayload = _serializer.BuildHandshakePayload(_localDeviceName, Array.Empty<byte>());
             var handshakeMsg = new ProtocolMessage
             {
                 Type = MessageType.Handshake,
@@ -83,7 +96,7 @@ public sealed class ConnectionManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to connect to device {Name}", device.Name);
+            _logger?.LogWarning(ex, "Failed to connect to device {Name} at {Ip}:{Port}", device.Name, device.IpAddress, device.Port);
             return false;
         }
     }
@@ -107,8 +120,7 @@ public sealed class ConnectionManager : IDisposable
             try
             {
                 var msg = new ProtocolMessage { Type = MessageType.Disconnect };
-                var data = _serializer.Serialize(msg);
-                await _client.SendAsync(data);
+                await SendFrameAsync(client, _serializer.Serialize(msg), CancellationToken.None);
             }
             catch { /* ignore */ }
         }
@@ -131,9 +143,18 @@ public sealed class ConnectionManager : IDisposable
                 throw new InvalidOperationException($"No active connection to device {deviceId}");
         }
 
-        var data = _serializer.Serialize(message);
-        await _server.SendToClientAsync(client, data, ct);
+        await SendFrameAsync(client, _serializer.Serialize(message), ct);
     }
+
+    /// <summary>
+    /// Outbound connections are owned by <see cref="TcpFileClient"/> (its send lock); inbound ones by
+    /// <see cref="TcpServer"/>. Writing to an outbound socket through the server (as before) skipped both
+    /// the length prefix and the lock.
+    /// </summary>
+    private Task SendFrameAsync(TcpClient client, byte[] frame, CancellationToken ct) =>
+        ReferenceEquals(client, _client.GetClient())
+            ? _client.SendAsync(frame, ct)
+            : _server.SendToClientAsync(client, frame, ct);
 
     public IReadOnlyList<Device> GetConnectedDevices()
     {
@@ -150,6 +171,8 @@ public sealed class ConnectionManager : IDisposable
 
     private void OnServerClientDisconnected(object? sender, ClientDisconnectedEventArgs e)
     {
+        _handler.OnConnectionClosed(e.Client);
+
         string? deviceId;
         Device? device;
 
@@ -170,36 +193,63 @@ public sealed class ConnectionManager : IDisposable
         }
     }
 
-    private async void OnServerDataReceived(object? sender, DataReceivedEventArgs e)
+    private async Task HandleServerFrameAsync(TcpClient client, byte[] frame, CancellationToken ct)
+    {
+        ProtocolMessage? message;
+        try
+        {
+            message = _serializer.Deserialize(frame);
+        }
+        catch (InvalidDataException ex)
+        {
+            _logger?.LogWarning("Dropping invalid frame from {Endpoint}: {Reason}", client.Client?.RemoteEndPoint, ex.Message);
+            return;
+        }
+
+        if (message == null)
+        {
+            _logger?.LogWarning("Dropping malformed frame ({Length} bytes)", frame.Length);
+            return;
+        }
+
+        RaiseMessageReceived(client, message);
+
+        // Always handled now (before, nothing ran when ITransferService was not registered in DI).
+        await _handler.HandleMessageAsync(message, client, ct);
+    }
+
+    private void OnClientDataReceived(object? sender, byte[] frame)
     {
         try
         {
-            var message = _serializer.Deserialize(e.Data);
+            var message = _serializer.Deserialize(frame);
             if (message == null)
+            {
+                _logger?.LogWarning("Dropping malformed frame from remote server ({Length} bytes)", frame.Length);
                 return;
-
-            // Find device for this client
-            string? deviceId;
-            Device? device;
-            lock (_lock)
-            {
-                deviceId = _activeConnections.FirstOrDefault(kv => kv.Value == e.Client).Key;
-                device = deviceId != null ? _devices.GetValueOrDefault(deviceId) : null;
             }
 
-            // Emit the message
-            OnMessageReceived?.Invoke(this, new MessageReceivedEventArgs(deviceId ?? string.Empty, device, message));
-
-            // Handle protocol message
-            if (_transferService != null)
-            {
-                await _handler.HandleMessageAsync(message, e.Client, CancellationToken.None);
-            }
+            var outbound = _client.GetClient();
+            if (outbound != null)
+                RaiseMessageReceived(outbound, message);
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Error processing received data");
+            _logger?.LogWarning(ex, "Error processing data from remote server");
         }
+    }
+
+    private void RaiseMessageReceived(TcpClient client, ProtocolMessage message)
+    {
+        string? deviceId;
+        Device? device;
+        lock (_lock)
+        {
+            deviceId = _activeConnections.FirstOrDefault(kv => kv.Value == client).Key;
+            device = deviceId != null ? _devices.GetValueOrDefault(deviceId) : null;
+        }
+
+        OnMessageReceived?.Invoke(this, new MessageReceivedEventArgs(deviceId ?? string.Empty, device, message));
     }
 
     public event EventHandler<DeviceConnectedEventArgs>? OnDeviceConnected;
@@ -214,7 +264,9 @@ public sealed class ConnectionManager : IDisposable
         _disposed = true;
         _server.OnClientConnected -= OnServerClientConnected;
         _server.OnClientDisconnected -= OnServerClientDisconnected;
-        _server.OnDataReceived -= OnServerDataReceived;
+        if (ReferenceEquals(_server.FrameHandler, _frameHandler))
+            _server.FrameHandler = null;
+        _client.OnDataReceived -= OnClientDataReceived;
 
         _server.Dispose();
         _client.Dispose();

@@ -1,56 +1,90 @@
 namespace FileBridge.Infrastructure.Network;
 
-using System.Net;
 using System.Threading.Channels;
 using FileBridge.Domain.Entities;
 using FileBridge.Domain.Interfaces;
+using Microsoft.Extensions.Logging;
 using Zeroconf;
 
 public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
 {
     private const string ServiceType = "_filetransfer._tcp.local.";
     private const int DiscoveryIntervalSeconds = 10;
-    private const int DiscoveryTimeoutSeconds = 30;
 
     private CancellationTokenSource? _cts;
     private readonly ILogger? _logger;
-    private readonly Channel<Device> _deviceChannel = Channel.CreateBounded<Device>(new BoundedChannelOptions(16)
+    private readonly Guid? _localDeviceId;
+    // Several producers can run (hosted service + "Refresh"), and nobody may be reading:
+    // never block the scan loop on a full channel.
+    private readonly Channel<Device> _deviceChannel = Channel.CreateBounded<Device>(new BoundedChannelOptions(64)
     {
         SingleReader = true,
-        SingleWriter = true
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest
     });
-    private readonly HashSet<string> _seenDeviceIds = new();
+    // deviceId -> "ip:port" last reported, so a device that changes address is reported again.
+    private readonly Dictionary<string, string> _seenDevices = new();
     private readonly object _seenLock = new();
+    private readonly object _loopLock = new();
     private Task? _discoveryLoop;
     private bool _disposed;
 
     public event EventHandler<Device>? OnDeviceFound;
     public event EventHandler<Device>? OnDeviceLost;
 
-    public ZeroconfDiscovery(ILogger? logger = null)
+    /// <summary>Optional limit for a discovery run; null (default) scans until <see cref="StopDiscoveryAsync"/>.
+    /// Before, the loop silently ended after 30 s, so a device started later was never found.</summary>
+    public TimeSpan? MaxDiscoveryDuration { get; set; }
+
+    public ZeroconfDiscovery(ILogger<ZeroconfDiscovery>? logger = null, FileBridgeOptions? options = null)
     {
         _logger = logger;
+        _localDeviceId = options?.DeviceId;
     }
 
-    public async Task StartDiscoveryAsync(CancellationToken ct = default)
+    public Task StartDiscoveryAsync(CancellationToken ct = default)
     {
         if (_disposed)
             throw new ObjectDisposedException(nameof(ZeroconfDiscovery));
 
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _discoveryLoop = DiscoveryLoopAsync(_cts.Token);
+        lock (_loopLock)
+        {
+            if (_discoveryLoop is { IsCompleted: false })
+                return Task.CompletedTask; // already scanning (e.g. hosted service + Refresh)
+
+            // A new run reports everything again: a page created after the first run starts empty.
+            lock (_seenLock)
+                _seenDevices.Clear();
+
+            _cts?.Dispose();
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _discoveryLoop = DiscoveryLoopAsync(_cts.Token);
+        }
+
         _logger?.LogInformation("mDNS discovery started");
+        return Task.CompletedTask;
     }
 
     public async Task StopDiscoveryAsync()
     {
-        _cts?.Cancel();
-        if (_discoveryLoop != null)
+        Task? loop;
+        lock (_loopLock)
         {
-            try { await _discoveryLoop; } catch { /* ignore */ }
+            _cts?.Cancel();
+            loop = _discoveryLoop;
         }
-        _cts?.Dispose();
-        _cts = null;
+
+        if (loop != null)
+        {
+            try { await loop; } catch { /* ignore */ }
+        }
+
+        lock (_loopLock)
+        {
+            _cts?.Dispose();
+            _cts = null;
+            _discoveryLoop = null;
+        }
         _logger?.LogInformation("mDNS discovery stopped");
     }
 
@@ -64,7 +98,7 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
 
     private async Task DiscoveryLoopAsync(CancellationToken ct)
     {
-        var endTime = DateTime.UtcNow.AddSeconds(DiscoveryTimeoutSeconds);
+        var endTime = MaxDiscoveryDuration is { } max ? DateTime.UtcNow + max : DateTime.MaxValue;
 
         while (!ct.IsCancellationRequested && DateTime.UtcNow < endTime)
         {
@@ -101,6 +135,8 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             retries: 1,
             cancellationToken: ct);
 
+        _logger?.LogInformation("mDNS scan: {Count} response(s)", responses.Count);
+
         foreach (var response in responses)
         {
             ct.ThrowIfCancellationRequested();
@@ -111,21 +147,27 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
                 if (device == null)
                     continue;
 
-                var isNew = false;
+                if (_localDeviceId is { } self && device.Id == self)
+                    continue; // our own advertisement
+
+                var endpoint = $"{device.IpAddress}:{device.Port}";
+                var isNewOrMoved = false;
                 lock (_seenLock)
                 {
-                    if (!_seenDeviceIds.Contains(device.Id.ToString()))
+                    var key = device.Id.ToString();
+                    if (!_seenDevices.TryGetValue(key, out var previous) || previous != endpoint)
                     {
-                        _seenDeviceIds.Add(device.Id.ToString());
-                        isNew = true;
+                        _seenDevices[key] = endpoint;
+                        isNewOrMoved = true;
                     }
                 }
 
-                if (isNew)
+                if (isNewOrMoved)
                 {
-                    await _deviceChannel.Writer.WriteAsync(device, ct);
+                    _deviceChannel.Writer.TryWrite(device);
                     OnDeviceFound?.Invoke(this, device);
-                    _logger?.LogInformation("Device discovered: {Name} ({IP})", device.Name, device.IpAddress);
+                    _logger?.LogInformation("Device discovered: {Name} at {Endpoint} (advertised: {All})",
+                        device.Name, endpoint, string.Join(", ", response.IPAddresses ?? Array.Empty<string>()));
                 }
             }
             catch (Exception ex)
@@ -137,22 +179,11 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
 
     private Device? ParseHostToDevice(IZeroconfHost host)
     {
-        // IPAddresses: IReadOnlyList<string> — each string is an IP address
-        var ipAddresses = host.IPAddresses;
-        string? ipAddress = null;
-        if (ipAddresses != null)
-        {
-            foreach (var addr in ipAddresses)
-            {
-                if (addr != "127.0.0.1" && addr != "::1" && !string.IsNullOrEmpty(addr))
-                {
-                    ipAddress = addr;
-                    break;
-                }
-            }
-            if (string.IsNullOrEmpty(ipAddress) && ipAddresses.Count > 0)
-                ipAddress = ipAddresses[0];
-        }
+        // A PC advertises every adapter (Wi-Fi, vEthernet/WSL, VirtualBox, VPN...). Prefer an IPv4 address
+        // in one of our own subnets instead of whichever came first.
+        var candidates = host.IPAddresses ?? Array.Empty<string>();
+        var ipAddress = LocalNetwork.ChooseBestAddress(candidates)
+                        ?? candidates.FirstOrDefault(a => !string.IsNullOrEmpty(a) && a != "127.0.0.1" && a != "::1");
         if (string.IsNullOrEmpty(ipAddress))
             return null;
 
@@ -162,10 +193,8 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             return null;
 
         var service = services.Values.FirstOrDefault();
-        if (service == null)
+        if (service == null || service.Port <= 0)
             return null;
-
-        var port = service.Port > 0 ? service.Port : 42420;
 
         // Get device name from DisplayName
         var deviceName = host.DisplayName;
@@ -175,7 +204,7 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
         // Properties: IReadOnlyList<IReadOnlyDictionary<string, string>>
         // Each dictionary entry contains a single key-value pair
         var props = service.Properties;
-        string deviceIdStr = Guid.NewGuid().ToString();
+        string? deviceIdStr = null;
 
         if (props != null)
         {
@@ -191,17 +220,24 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             }
         }
 
+        // Without a stable id every scan would create a "new" device: derive one from the endpoint instead.
         if (!Guid.TryParse(deviceIdStr, out var deviceId))
-            deviceId = Guid.NewGuid();
+            deviceId = DeterministicGuid($"{ipAddress}:{service.Port}");
 
         return new Device
         {
             Id = deviceId,
             Name = deviceName,
             IpAddress = ipAddress,
-            Port = port,
+            Port = service.Port,
             LastSeenAt = DateTimeOffset.UtcNow
         };
+    }
+
+    private static Guid DeterministicGuid(string value)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value));
+        return new Guid(hash.AsSpan(0, 16));
     }
 
     public void Dispose()
@@ -210,8 +246,12 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             return;
 
         _disposed = true;
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _deviceChannel.Writer.Complete();
+        lock (_loopLock)
+        {
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = null;
+        }
+        _deviceChannel.Writer.TryComplete();
     }
 }

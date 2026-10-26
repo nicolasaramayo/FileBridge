@@ -11,5 +11,9 @@ public enum MessageType : byte
     Resume = 0x07,
     Ack = 0x08,
     Error = 0x09,
-    Disconnect = 0x0A
+    Disconnect = 0x0A,
+
+    /// <summary>Sender → receiver after the last Data chunk: transfer id + SHA-256 of the whole file.
+    /// The receiver answers Ack (hash and size verified) or Error.</summary>
+    TransferComplete = 0x0B
 }

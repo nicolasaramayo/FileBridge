@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using FileBridge.Domain.Entities;
 using FileBridge.Domain.Interfaces;
 
@@ -7,25 +6,24 @@ namespace FileBridge.Application.Services;
 public class DeviceDiscoveryService : IDiscoveryService
 {
     private readonly IDiscoveryService _innerDiscovery;
-    private readonly Channel<Device> _deviceChannel = Channel.CreateBounded<Device>(new BoundedChannelOptions(16)
-    {
-        SingleReader = true,
-        SingleWriter = true
-    });
+    private readonly IDeviceRegistry? _registry;
 
     public event EventHandler<Device>? OnDeviceFound;
     public event EventHandler<Device>? OnDeviceLost;
 
-    public DeviceDiscoveryService(IDiscoveryService innerDiscovery)
+    public DeviceDiscoveryService(IDiscoveryService innerDiscovery, IDeviceRegistry? registry = null)
     {
         _innerDiscovery = innerDiscovery ?? throw new ArgumentNullException(nameof(innerDiscovery));
-        
+        _registry = registry;
+
         // Wire up events from wrapped discovery
         _innerDiscovery.OnDeviceFound += (sender, device) =>
         {
+            // Remember the device so a transfer job (which only has DeviceId) can find its address later.
+            _registry?.AddOrUpdate(device);
             OnDeviceFound?.Invoke(this, device);
         };
-        
+
         _innerDiscovery.OnDeviceLost += (sender, device) =>
         {
             OnDeviceLost?.Invoke(this, device);

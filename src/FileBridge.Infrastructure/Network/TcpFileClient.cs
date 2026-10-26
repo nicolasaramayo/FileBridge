@@ -1,6 +1,8 @@
 namespace FileBridge.Infrastructure.Network;
 
+using System.IO;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
 
 public sealed class TcpFileClient : IDisposable
 {
@@ -18,6 +20,12 @@ public sealed class TcpFileClient : IDisposable
     public bool IsConnected => _client?.Connected ?? false;
 
     /// <summary>
+    /// How long to wait for the TCP connection. Without it, an unreachable LAN address (wrong adapter
+    /// IP, device asleep, firewall dropping packets) blocks for the OS default (~20 s or more).
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Gets the underlying TcpClient for connection tracking.
     /// </summary>
     public System.Net.Sockets.TcpClient? GetClient() => _client;
@@ -26,7 +34,7 @@ public sealed class TcpFileClient : IDisposable
     public event EventHandler? OnDisconnected;
     public event EventHandler<byte[]>? OnDataReceived;
 
-    public TcpFileClient(ILogger? logger = null)
+    public TcpFileClient(ILogger<TcpFileClient>? logger = null)
     {
         _logger = logger;
     }
@@ -48,18 +56,28 @@ public sealed class TcpFileClient : IDisposable
 
         _client = new System.Net.Sockets.TcpClient();
         _client.NoDelay = true;
-        _client.SendTimeout = 30000;
-        _client.ReceiveTimeout = 30000;
 
-        await _client.ConnectAsync(Host!, Port, ct);
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            timeout.CancelAfter(ConnectTimeout);
+            try
+            {
+                await _client.ConnectAsync(Host, Port, timeout.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                CleanupConnection();
+                throw new TimeoutException($"Could not connect to {Host}:{Port} within {ConnectTimeout.TotalSeconds:0} s.");
+            }
+        }
+
         _stream = _client.GetStream();
-
         _cts = new CancellationTokenSource();
 
         _logger?.LogInformation("Connected to {Host}:{Port}", Host, Port);
         OnConnected?.Invoke(this, EventArgs.Empty);
 
-        _ = ReceiveLoopAsync(_cts.Token);
+        _ = ReceiveLoopAsync(_stream, _cts.Token);
     }
 
     public async Task ReconnectAsync(CancellationToken ct = default)
@@ -68,7 +86,7 @@ public sealed class TcpFileClient : IDisposable
             throw new InvalidOperationException("No host configured");
 
         _reconnectDelayMs = Math.Min(_reconnectDelayMs * 2, MaxReconnectDelayMs);
-        _logger?.LogWarning("Reconnecting in {_reconnectDelayMs}ms...");
+        _logger?.LogWarning("Reconnecting in {Delay}ms...", _reconnectDelayMs);
         await Task.Delay(_reconnectDelayMs, ct);
 
         try
@@ -83,14 +101,16 @@ public sealed class TcpFileClient : IDisposable
         }
     }
 
-    public async Task DisconnectAsync()
+    public Task DisconnectAsync()
     {
         _reconnectDelayMs = 1000;
         CleanupConnection();
         _logger?.LogInformation("Disconnected from {Host}:{Port}", Host, Port);
         OnDisconnected?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
     }
 
+    /// <summary>Sends one frame (a serialized <see cref="ProtocolMessage"/>).</summary>
     public async Task SendAsync(byte[] data, CancellationToken ct = default)
     {
         await _sendLock.WaitAsync(ct);
@@ -99,11 +119,7 @@ public sealed class TcpFileClient : IDisposable
             if (_stream == null || !IsConnected)
                 throw new IOException("Not connected");
 
-            // Write length prefix (4 bytes, little-endian)
-            var lengthPrefix = BitConverter.GetBytes(data.Length);
-            await _stream.WriteAsync(lengthPrefix.AsMemory(), ct);
-            await _stream.WriteAsync(data.AsMemory(), ct);
-            await _stream.FlushAsync(ct);
+            await FrameIO.WriteFrameAsync(_stream, data, ct);
         }
         finally
         {
@@ -111,49 +127,22 @@ public sealed class TcpFileClient : IDisposable
         }
     }
 
+    /// <summary>Reads the next frame, or null if the connection was closed.</summary>
     public async Task<byte[]?> ReceiveAsync(CancellationToken ct = default)
     {
         if (_stream == null || !IsConnected)
             return null;
 
-        // Read 4-byte length prefix
-        var lengthBuffer = new byte[4];
-        var read = await _stream.ReadAsync(lengthBuffer.AsMemory(), ct);
-        if (read == 0)
-            return null;
-
-        if (read < 4)
-        {
-            var remaining = new byte[4 - read];
-            var r = await _stream.ReadAsync(remaining.AsMemory(), ct);
-            if (r == 0) return null;
-            Array.Copy(remaining, 0, lengthBuffer, read, r);
-        }
-
-        var length = BitConverter.ToInt32(lengthBuffer, 0);
-        if (length <= 0 || length > 10 * 1024 * 1024)
-            return null;
-
-        var payload = new byte[length];
-        var totalRead = 0;
-        while (totalRead < length)
-        {
-            var chunk = await _stream.ReadAsync(payload.AsMemory(totalRead, length - totalRead), ct);
-            if (chunk == 0)
-                return null;
-            totalRead += chunk;
-        }
-
-        return payload;
+        return await FrameIO.ReadFrameAsync(_stream, ct);
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken ct)
+    private async Task ReceiveLoopAsync(NetworkStream stream, CancellationToken ct)
     {
         try
         {
-            while (!ct.IsCancellationRequested && IsConnected)
+            while (!ct.IsCancellationRequested)
             {
-                var data = await ReceiveAsync(ct);
+                var data = await FrameIO.ReadFrameAsync(stream, ct);
                 if (data == null)
                     break;
 
@@ -161,6 +150,7 @@ public sealed class TcpFileClient : IDisposable
             }
         }
         catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
         catch (IOException) { }
         catch (Exception ex)
         {
@@ -171,7 +161,7 @@ public sealed class TcpFileClient : IDisposable
             if (!ct.IsCancellationRequested)
             {
                 // Unexpected disconnect — notify
-                _logger?.LogWarning("Connection lost unexpectedly");
+                _logger?.LogWarning("Connection to {Host}:{Port} lost", Host, Port);
                 OnDisconnected?.Invoke(this, EventArgs.Empty);
             }
         }
@@ -179,7 +169,7 @@ public sealed class TcpFileClient : IDisposable
 
     private void CleanupConnection()
     {
-        _cts?.Cancel();
+        try { _cts?.Cancel(); } catch (ObjectDisposedException) { }
         _cts?.Dispose();
         _cts = null;
 
