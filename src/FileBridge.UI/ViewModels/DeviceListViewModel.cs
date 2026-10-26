@@ -115,17 +115,23 @@ public partial class DeviceListViewModel : ViewModelBase
             }
         }
 
-        if (!System.Net.IPAddress.TryParse(host, out _))
+        // IPAddress.TryParse also accepts short forms ("10" -> 0.0.0.10, "192.168.1" -> 192.168.0.1) and IPv6,
+        // but the server listens on IPv4 only: require four dotted parts and store the normalized text.
+        if (host.Split('.').Length != 4
+            || !System.Net.IPAddress.TryParse(host, out var ip)
+            || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         {
-            SetError($"'{host}' is not an IP address (example: 192.168.1.10:{DefaultPort})");
+            SetError($"'{host}' is not an IPv4 address (example: 192.168.1.10:{DefaultPort})");
             return;
         }
 
+        var address = ip.ToString();
+        var existing = _registry.All.FirstOrDefault(d => d.IpAddress == address && d.Port == port);
         _registry.AddOrUpdate(new DomainDevice
         {
-            Id = Guid.NewGuid(),
-            Name = $"{host}:{port}",
-            IpAddress = host,
+            Id = existing?.Id ?? Guid.NewGuid(), // adding the same IP:port twice updates the entry instead of duplicating it
+            Name = $"{address}:{port}",
+            IpAddress = address,
             Port = port,
             LastSeenAt = DateTimeOffset.UtcNow
         });

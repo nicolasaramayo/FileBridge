@@ -112,7 +112,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackLayout Grid.Column="0">
                                         <Label Text="{Binding LocalFilePath}" FontSize="14" LineBreakMode="TailTruncation" />
-                                        <Label Text="{Binding CompletedAt, StringFormat='{}{0:MMM dd, HH:mm}'}" 
+                                        <Label Text="{Binding CompletedAt, StringFormat='{0:MMM dd, HH:mm}'}" 
                                                FontSize="11" Opacity="0.7" />
                                     </StackLayout>
                                     <Label Grid.Column="1" 

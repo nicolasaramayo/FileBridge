@@ -50,7 +50,7 @@
                     <StackLayout>
                         <Label Text="Chunk Size" FontSize="14" Opacity="0.7" />
                         <StackLayout Orientation="Horizontal" Spacing="10">
-                            <Label Text="{Binding DefaultChunkSize, StringFormat='{}{0} bytes'}" VerticalOptions="Center" />
+                            <Label Text="{Binding DefaultChunkSize, StringFormat='{0} bytes'}" VerticalOptions="Center" />
                             <Slider 
                                 Minimum="16384" 
                                 Maximum="262144" 
