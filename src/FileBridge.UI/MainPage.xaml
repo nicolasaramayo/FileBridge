@@ -6,6 +6,21 @@
         <Label Text="FileBridge" FontSize="32" HorizontalOptions="Center" />
         <Label Text="Transfer files between your devices" HorizontalOptions="Center" />
         
+        <!-- What the other device needs to reach this one, and what has been received -->
+        <Border Padding="12" StrokeShape="RoundRectangle 10">
+            <VerticalStackLayout Spacing="4">
+                <Label Text="{Binding ThisDevice, StringFormat='This device: {0}'}" FontAttributes="Bold" />
+                <Label Text="{Binding ListeningOn, StringFormat='Receiving on: {0}'}" FontSize="12" />
+                <Label Text="{Binding ReceivedFolder, StringFormat='Saving to: {0}'}" FontSize="12" LineBreakMode="MiddleTruncation" />
+                <Label Text="{Binding ReceiveStatus}" FontSize="12" />
+                <HorizontalStackLayout Spacing="8">
+                    <Button Text="Refresh" Command="{Binding RefreshStatusCommand}" />
+                    <Button Text="Open last received" Command="{Binding OpenLastReceivedCommand}" IsVisible="{Binding HasReceivedFile}" />
+                </HorizontalStackLayout>
+                <Label Text="{Binding ErrorMessage}" FontSize="12" TextColor="Red" />
+            </VerticalStackLayout>
+        </Border>
+
         <Button Text="📱 Devices" Command="{Binding OpenDevicesCommand}" />
         <Button Text="📁 Transfers" Command="{Binding OpenTransfersCommand}" />
         <Button Text="⚙️ Settings" Command="{Binding OpenSettingsCommand}" />

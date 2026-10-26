@@ -9,6 +9,7 @@
 
     <ContentPage.Resources>
         <conv:BoolToInverseConverter x:Key="InverseBoolConverter" />
+        <conv:IsEmptyConverter x:Key="IsEmptyConverter" />
     </ContentPage.Resources>
 
     <Grid>
@@ -21,6 +22,17 @@
         <StackLayout Grid.Row="0" Padding="16,12" BackgroundColor="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}">
             <Label Text="Nearby Devices" FontSize="20" FontAttributes="Bold" TextColor="White" />
             <Label Text="Select a device to send or receive files" FontSize="12" TextColor="White" Opacity="0.8" />
+            <!-- Fallback when mDNS does not work on this network: type the IP:port shown on the other device's home page -->
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="0,8,0,0">
+                <Entry Grid.Column="0"
+                       Text="{Binding ManualAddress}"
+                       Placeholder="Add by IP, e.g. 192.168.1.10:45678"
+                       Keyboard="Url"
+                       BackgroundColor="White"
+                       TextColor="Black" />
+                <Button Grid.Column="1" Text="Add" Command="{Binding AddManualDeviceCommand}" />
+            </Grid>
+            <Label Text="{Binding ErrorMessage}" FontSize="12" TextColor="#FFE0E0" />
         </StackLayout>
 
         <!-- Device List -->
@@ -30,17 +42,13 @@
                   HasUnevenRows="True"
                   RefreshCommand="{Binding RefreshCommand}"
                   IsPullToRefreshEnabled="True"
-                  IsRefreshing="{Binding IsRefreshing}">
+                  IsRefreshing="{Binding IsRefreshing}"
+                  ItemTapped="OnDeviceTapped">
             <ListView.ItemTemplate>
                 <DataTemplate>
                     <ViewCell>
                         <Frame Margin="12,6" Padding="12" CornerRadius="10" 
                                BorderColor="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray700}}">
-                            <Frame.GestureRecognizers>
-                                <TapGestureRecognizer 
-                                    NumberOfTapsRequired="1"
-                                    Tapped="OnDeviceTapped" />
-                            </Frame.GestureRecognizers>
                             <StackLayout Orientation="Horizontal">
                                 <!-- Device Icon -->
                                 <Label Text="📱" FontSize="32" VerticalOptions="Center" WidthRequest="48" />
@@ -48,7 +56,15 @@
                                 <!-- Device Info -->
                                 <StackLayout VerticalOptions="Center" HorizontalOptions="FillAndExpand">
                                     <Label Text="{Binding Name}" FontSize="16" FontAttributes="Bold" />
-                                    <Label Text="{Binding IpAddress}" FontSize="12" Opacity="0.7" />
+                                    <Label FontSize="12" Opacity="0.7">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding IpAddress}" />
+                                                <Span Text=":" />
+                                                <Span Text="{Binding Port}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
                                 </StackLayout>
                                 
                                 <!-- Action Button -->
@@ -67,7 +83,7 @@
                      HorizontalOptions="Center" 
                      VerticalOptions="Center"
                      Spacing="12"
-                     IsVisible="{Binding Devices.Count, Converter={StaticResource InverseBoolConverter}, FallbackValue=False}">
+                     IsVisible="{Binding Devices.Count, Converter={StaticResource IsEmptyConverter}, FallbackValue=False}">
             <Label Text="📡" FontSize="64" HorizontalOptions="Center" />
             <Label Text="No devices found" FontSize="18" FontAttributes="Bold" HorizontalOptions="Center" />
             <Label Text="Make sure the other device is connected to the same network" 

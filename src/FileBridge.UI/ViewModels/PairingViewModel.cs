@@ -7,7 +7,7 @@ using DomainDevice = FileBridge.Domain.Entities.Device;
 
 namespace FileBridge.UI.ViewModels;
 
-public partial class PairingViewModel : ViewModelBase
+public partial class PairingViewModel : ViewModelBase, IQueryAttributable
 {
     private readonly IPairingService _pairingService;
     private readonly INavigationService _navigationService;
@@ -34,6 +34,13 @@ public partial class PairingViewModel : ViewModelBase
         _pairingService = pairingService;
         _navigationService = navigationService;
         _pairingService.OnPairingCompleted += OnPairingCompleted;
+    }
+
+    /// <summary>Navigation parameters ("device", "code") arrive here; before, SetDevice was never called.</summary>
+    public void ApplyQueryAttributes(IDictionary<string, object> query)
+    {
+        if (query.TryGetValue("device", out var value) && value is DomainDevice device)
+            SetDevice(device, query.TryGetValue("code", out var code) ? code as string : null);
     }
 
     public void SetDevice(DomainDevice device, string? code)

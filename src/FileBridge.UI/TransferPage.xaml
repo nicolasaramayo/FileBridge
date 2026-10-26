@@ -24,6 +24,7 @@
         <!-- Header -->
         <StackLayout Grid.Row="0" Padding="16,12" BackgroundColor="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}">
             <Label Text="Active Transfers" FontSize="20" FontAttributes="Bold" TextColor="White" />
+            <Label Text="{Binding StatusMessage}" FontSize="14" TextColor="White" LineBreakMode="WordWrap" />
         </StackLayout>
 
         <!-- Active Transfers List -->

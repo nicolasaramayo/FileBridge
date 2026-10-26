@@ -1,16 +1,16 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using FileBridge.Application.Services;
 using FileBridge.Domain.Entities;
+using FileBridge.Domain.Interfaces;
 using FileBridge.UI.Services;
 using System.Collections.ObjectModel;
 using DomainDevice = FileBridge.Domain.Entities.Device;
 
 namespace FileBridge.UI.ViewModels;
 
-public partial class FileBrowserViewModel : ViewModelBase
+public partial class FileBrowserViewModel : ViewModelBase, IQueryAttributable
 {
-    private readonly FileService _fileService;
+    private readonly IFileService _fileService;
     private readonly INavigationService _navigationService;
     private DomainDevice? _currentDevice;
 
@@ -29,10 +29,17 @@ public partial class FileBrowserViewModel : ViewModelBase
     [ObservableProperty]
     private bool _isMultiSelectMode;
 
-    public FileBrowserViewModel(FileService fileService, INavigationService navigationService)
+    public FileBrowserViewModel(IFileService fileService, INavigationService navigationService)
     {
         _fileService = fileService;
         _navigationService = navigationService;
+    }
+
+    /// <summary>Shell delivers the navigation parameters here (before, "device" never reached this VM).</summary>
+    public void ApplyQueryAttributes(IDictionary<string, object> query)
+    {
+        if (query.TryGetValue("device", out var value) && value is DomainDevice device)
+            SetDevice(device);
     }
 
     public void SetDevice(DomainDevice device)
@@ -110,7 +117,7 @@ public partial class FileBrowserViewModel : ViewModelBase
         // Navigate to transfer page for single file selection
         if (_currentDevice != null)
         {
-            await _navigationService.GoToAsync("//transfers", new Dictionary<string, object>
+            await _navigationService.GoToAsync("transfers", new Dictionary<string, object>
             {
                 { "file", file },
                 { "device", _currentDevice }
@@ -145,7 +152,7 @@ public partial class FileBrowserViewModel : ViewModelBase
 
                 if (_currentDevice != null)
                 {
-                    await _navigationService.GoToAsync("//transfers", new Dictionary<string, object>
+                    await _navigationService.GoToAsync("transfers", new Dictionary<string, object>
                     {
                         { "file", fileItem },
                         { "device", _currentDevice }
@@ -174,7 +181,7 @@ public partial class FileBrowserViewModel : ViewModelBase
     {
         if (_currentDevice == null || SelectedFiles.Count == 0) return;
 
-        await _navigationService.GoToAsync("//transfers", new Dictionary<string, object>
+        await _navigationService.GoToAsync("transfers", new Dictionary<string, object>
         {
             { "files", SelectedFiles.ToList() },
             { "device", _currentDevice }
