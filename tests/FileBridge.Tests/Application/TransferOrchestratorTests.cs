@@ -90,6 +90,40 @@ public class TransferOrchestratorTests
     }
 
     [TestMethod]
+    public async Task APauseThatArrivesAsTheReceiverConfirms_DoesNotHideTheCompletion()
+    {
+        // The receiver has the file and confirmed it: it is complete, even if the user tapped Pause at that moment.
+        var device = new Device { Id = Guid.NewGuid(), IpAddress = "10.0.0.2", Port = 1 };
+        var registry = new DeviceRegistry();
+        registry.AddOrUpdate(device);
+        var job = new TransferJob { Id = Guid.NewGuid(), DeviceId = device.Id, LocalFilePath = TempFile(10) };
+        TransferOrchestrator orchestrator = null!;
+        var transport = new FakeTransport
+        {
+            Behavior = async (_, _, _) =>
+            {
+                await orchestrator.PauseAsync(job.Id.ToString()); // lands while the last ACK is being processed
+                return new FileTransferResult(10, "confirmed");
+            }
+        };
+        orchestrator = new TransferOrchestrator(transport, registry);
+
+        var ok = await orchestrator.SendFileAsync(job);
+
+        Assert.IsTrue(ok);
+        Assert.AreEqual(TransferStatus.Completed, job.Status);
+    }
+
+    [TestMethod]
+    public async Task PauseOrCancelOfAnUnknownOrFinishedJob_DoesNotThrow()
+    {
+        var orchestrator = new TransferOrchestrator(new FakeTransport(), new DeviceRegistry());
+
+        await orchestrator.PauseAsync(Guid.NewGuid().ToString());
+        await orchestrator.CancelAsync(Guid.NewGuid().ToString());
+    }
+
+    [TestMethod]
     public async Task ReceiveFileAsync_IsExplicitlyNotSupported_InsteadOfFakingSuccess()
     {
         var orchestrator = new TransferOrchestrator(new FakeTransport(), new DeviceRegistry());

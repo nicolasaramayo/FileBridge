@@ -97,7 +97,15 @@ public sealed class NetworkChangeWatcher : IMauiInitializeService
 				return;
 
 			_logger?.LogInformation("IPv4 addresses changed ({Old} -> {New}); announcing this device again", previous, addresses);
-			await _transfers.RestartAdvertisingAsync(); // logs and swallows its own errors; raises StatusChanged
+			if (!await _transfers.RestartAdvertisingAsync()) // logs its own errors; raises StatusChanged
+			{
+				// Not advertised now: forget these addresses so the next check (resume, or within a minute) retries.
+				lock (_sync)
+				{
+					if (_lastAddresses == addresses)
+						_lastAddresses = string.Empty;
+				}
+			}
 		}
 		catch (Exception ex)
 		{

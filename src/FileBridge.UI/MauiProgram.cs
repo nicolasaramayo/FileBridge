@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.LifecycleEvents;
 using FileBridge.Infrastructure.Services;
 using FileBridge.UI.Services;
 using FileBridge.UI.ViewModels;
@@ -18,6 +19,16 @@ public static class MauiProgram
 				fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
 				fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
 			});
+
+#if WINDOWS
+		// MAUI turns "window hidden" into Window.Stopped but raises nothing when it becomes visible again without
+		// focus (only activation counts), so tell AppVisibility directly.
+		builder.ConfigureLifecycleEvents(lifecycle => lifecycle.AddWindows(windows => windows.OnVisibilityChanged((_, args) =>
+		{
+			if (args.Visible)
+				(IPlatformApplication.Current?.Services.GetService(typeof(AppVisibility)) as AppVisibility)?.ReportVisible(true);
+		})));
+#endif
 
 #if DEBUG
 		// Network-layer logs now go through ILogger<T>: visible in the Output window / logcat.

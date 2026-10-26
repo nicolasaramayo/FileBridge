@@ -44,15 +44,12 @@ public class TransferOrchestrator : ITransferService
             if (job.TotalBytes <= 0 && File.Exists(job.LocalFilePath))
                 job.TotalBytes = new FileInfo(job.LocalFilePath).Length;
 
-            // Paused/cancelled before the cancellation source above was registered: stop here
-            // instead of overwriting that status with InProgress.
-            if (job.Status is TransferStatus.Cancelled or TransferStatus.Paused)
+            // The queue (TransferBackgroundService) already moved it to InProgress; a job handed to us directly
+            // is still Pending. Anything else (paused/cancelled before the cancellation source above was
+            // registered) stops here instead of being overwritten with InProgress.
+            if (!job.TryChangeStatus(TransferStatus.InProgress, TransferStatus.Pending, TransferStatus.InProgress))
                 throw new OperationCanceledException();
 
-            // The queue (TransferBackgroundService) already moved it to InProgress under its own lock;
-            // only a job handed to us directly is still Pending.
-            if (job.Status == TransferStatus.Pending)
-                job.Status = TransferStatus.InProgress;
             var progress = new ThrottledProgress(this, job);
             progress.Report(0);
 
@@ -60,9 +57,11 @@ public class TransferOrchestrator : ITransferService
             var result = await _transport.SendFileAsync(target, job.LocalFilePath, job.Id, progress, cts.Token);
 
             job.TransferredBytes = result.BytesSent;
-            progress.ReportFinal(result.BytesSent);
-            job.Status = TransferStatus.Completed;
             job.CompletedAt = DateTimeOffset.UtcNow;
+            // The receiver confirmed the file: it is complete even if a pause/cancel arrived at the last moment.
+            job.TryChangeStatus(TransferStatus.Completed,
+                TransferStatus.InProgress, TransferStatus.Paused, TransferStatus.Cancelled, TransferStatus.Pending);
+            progress.ReportFinal(result.BytesSent);
             return true;
         }
         catch (Exception ex) when (ex is OperationCanceledException || cts.IsCancellationRequested)
@@ -70,14 +69,13 @@ public class TransferOrchestrator : ITransferService
             // Only a running attempt becomes Cancelled. Paused stays Paused, and Pending means it was
             // resumed while this attempt was unwinding (it is queued again): overwriting either would
             // turn a pause or a resume into a cancel.
-            if (job.Status == TransferStatus.InProgress)
-                job.Status = TransferStatus.Cancelled;
+            job.TryChangeStatus(TransferStatus.Cancelled, TransferStatus.InProgress);
             return false;
         }
         catch (Exception ex)
         {
-            job.Status = TransferStatus.Failed;
             job.ErrorMessage = ex.Message;
+            job.TryChangeStatus(TransferStatus.Failed, TransferStatus.InProgress, TransferStatus.Pending);
             return false;
         }
         finally
@@ -101,44 +99,45 @@ public class TransferOrchestrator : ITransferService
         return Task.FromResult(false);
     }
 
+    /// <summary>Stops the running attempt and leaves the job Paused (callers such as the queue may already have set it).</summary>
     public async Task PauseAsync(string jobId)
     {
-        if (_activeTransfers.TryGetValue(jobId, out var job))
+        if (_activeTransfers.TryGetValue(jobId, out var job)
+            && job.TryChangeStatus(TransferStatus.Paused, TransferStatus.InProgress))
         {
-            job.Status = TransferStatus.Paused;
             job.ResumeToken = job.TransferredBytes.ToString();
         }
 
-        if (_transferCancellations.TryGetValue(jobId, out var cts))
-        {
-            await cts.CancelAsync();
-        }
+        await CancelAttemptAsync(jobId);
     }
 
-    public async Task ResumeAsync(string jobId)
-    {
-        if (_activeTransfers.TryGetValue(jobId, out var job) && !string.IsNullOrEmpty(job.ResumeToken))
-        {
-            if (long.TryParse(job.ResumeToken, out var offset))
-            {
-                job.TransferredBytes = offset;
-                job.Status = TransferStatus.InProgress;
-            }
-        }
+    /// <summary>
+    /// Nothing to do here: a paused attempt has already ended. Resuming means sending the job again,
+    /// which the queue does (TransferBackgroundService.ResumeAsync).
+    /// </summary>
+    public Task ResumeAsync(string jobId) => Task.CompletedTask;
 
-        await Task.CompletedTask;
-    }
-
+    /// <summary>Stops the running attempt and leaves the job Cancelled; a completed job stays Completed.</summary>
     public async Task CancelAsync(string jobId)
     {
-        if (_transferCancellations.TryGetValue(jobId, out var cts))
+        if (_activeTransfers.TryGetValue(jobId, out var job))
+            job.TryChangeStatus(TransferStatus.Cancelled, TransferStatus.Pending, TransferStatus.InProgress, TransferStatus.Paused);
+
+        await CancelAttemptAsync(jobId);
+    }
+
+    private async Task CancelAttemptAsync(string jobId)
+    {
+        if (!_transferCancellations.TryGetValue(jobId, out var cts))
+            return;
+
+        try
         {
             await cts.CancelAsync();
         }
-
-        if (_activeTransfers.TryGetValue(jobId, out var job))
+        catch (ObjectDisposedException)
         {
-            job.Status = TransferStatus.Cancelled;
+            // The attempt finished (and disposed it) in the meantime: nothing left to stop.
         }
     }
 

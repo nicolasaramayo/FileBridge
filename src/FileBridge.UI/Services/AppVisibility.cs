@@ -23,6 +23,12 @@ public sealed class AppVisibility
 		window.Destroying += (_, _) => Set(false);
 	}
 
+	/// <summary>
+	/// For platform events MAUI does not map: on Windows a window restored without focus (e.g. Win+D twice)
+	/// becomes visible again but raises no Activated/Resumed (see MauiProgram).
+	/// </summary>
+	public void ReportVisible(bool visible) => Set(visible);
+
 	private void Set(bool onScreen)
 	{
 		if (_isOnScreen == onScreen)

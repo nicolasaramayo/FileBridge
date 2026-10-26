@@ -25,7 +25,9 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
     // deviceId -> "ip:port" last reported, so a device that changes address is reported again.
     private readonly Dictionary<string, string> _seenDevices = new();
     private readonly object _seenLock = new();
-    private readonly object _loopLock = new();
+    // Start and Stop are serialized: a Stop that was still waiting for the old loop used to clear and dispose
+    // the cancellation source of a loop started in the meantime, which then could never be stopped.
+    private readonly SemaphoreSlim _startStopGate = new(1, 1);
     private Task? _discoveryLoop;
     private bool _disposed;
 
@@ -42,15 +44,19 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
         _localDeviceId = options?.DeviceId;
     }
 
-    public Task StartDiscoveryAsync(CancellationToken ct = default)
+    /// <summary>True while a discovery run is active.</summary>
+    public bool IsScanning => _discoveryLoop is { IsCompleted: false };
+
+    public async Task StartDiscoveryAsync(CancellationToken ct = default)
     {
         if (_disposed)
             throw new ObjectDisposedException(nameof(ZeroconfDiscovery));
 
-        lock (_loopLock)
+        await _startStopGate.WaitAsync(CancellationToken.None);
+        try
         {
             if (_discoveryLoop is { IsCompleted: false })
-                return Task.CompletedTask; // already scanning (e.g. hosted service + Refresh)
+                return; // already scanning (e.g. hosted service + Refresh)
 
             // A new run reports everything again: a page created after the first run starts empty.
             lock (_seenLock)
@@ -60,30 +66,32 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             _discoveryLoop = DiscoveryLoopAsync(_cts.Token);
         }
+        finally
+        {
+            _startStopGate.Release();
+        }
 
         _logger?.LogInformation("mDNS discovery started");
-        return Task.CompletedTask;
     }
 
     public async Task StopDiscoveryAsync()
     {
-        Task? loop;
-        lock (_loopLock)
+        await _startStopGate.WaitAsync();
+        try
         {
             _cts?.Cancel();
-            loop = _discoveryLoop;
-        }
+            if (_discoveryLoop != null)
+            {
+                try { await _discoveryLoop; } catch { /* ignore */ }
+            }
 
-        if (loop != null)
-        {
-            try { await loop; } catch { /* ignore */ }
-        }
-
-        lock (_loopLock)
-        {
             _cts?.Dispose();
             _cts = null;
             _discoveryLoop = null;
+        }
+        finally
+        {
+            _startStopGate.Release();
         }
         _logger?.LogInformation("mDNS discovery stopped");
     }
@@ -246,12 +254,7 @@ public sealed class ZeroconfDiscovery : IDiscoveryService, IDisposable
             return;
 
         _disposed = true;
-        lock (_loopLock)
-        {
-            _cts?.Cancel();
-            _cts?.Dispose();
-            _cts = null;
-        }
+        try { _cts?.Cancel(); } catch (ObjectDisposedException) { /* already stopped */ }
         _deviceChannel.Writer.TryComplete();
     }
 }
