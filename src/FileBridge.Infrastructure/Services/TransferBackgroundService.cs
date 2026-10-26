@@ -1,5 +1,6 @@
 namespace FileBridge.Infrastructure.Services;
 
+using System.Collections.Concurrent;
 using System.IO;
 using System.Threading.Channels;
 using FileBridge.Application.DTOs;
@@ -30,6 +31,9 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
     private readonly Channel<(TransferJob Job, TransferProgressDto Progress)> _progressChannel;
     private readonly SemaphoreSlim _queueSemaphore = new(1, 1);
     private readonly Queue<TransferJob> _transferQueue = new();
+    // Restored: f1415d8 replaced this declaration with _advertiser and the project stopped compiling (CS0103).
+    // Concurrent because it is touched from the UI thread, the queue loop and progress callbacks.
+    private readonly ConcurrentDictionary<string, TransferJob> _activeJobs = new();
     private readonly ZeroconfAdvertiser _advertiser;
 
     public ChannelReader<(TransferJob Job, TransferProgressDto Progress)> ProgressChannel => _progressChannel.Reader;
@@ -154,7 +158,7 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         if (_activeJobs.TryGetValue(jobId, out var job))
         {
             job.Status = TransferStatus.Cancelled;
-            _activeJobs.Remove(jobId);
+            _activeJobs.TryRemove(jobId, out _);
             _logger.LogInformation("Cancelled transfer: {JobId}", jobId);
         }
         return Task.CompletedTask;
@@ -223,7 +227,7 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
                     }
                     finally
                     {
-                        _activeJobs.Remove(job.Id.ToString());
+                        _activeJobs.TryRemove(job.Id.ToString(), out _);
                     }
                 }
 
