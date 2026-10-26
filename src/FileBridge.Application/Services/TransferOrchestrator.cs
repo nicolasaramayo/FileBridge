@@ -49,7 +49,10 @@ public class TransferOrchestrator : ITransferService
             if (job.Status is TransferStatus.Cancelled or TransferStatus.Paused)
                 throw new OperationCanceledException();
 
-            job.Status = TransferStatus.InProgress;
+            // The queue (TransferBackgroundService) already moved it to InProgress under its own lock;
+            // only a job handed to us directly is still Pending.
+            if (job.Status == TransferStatus.Pending)
+                job.Status = TransferStatus.InProgress;
             var progress = new ThrottledProgress(this, job);
             progress.Report(0);
 
@@ -62,9 +65,12 @@ public class TransferOrchestrator : ITransferService
             job.CompletedAt = DateTimeOffset.UtcNow;
             return true;
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException || cts.IsCancellationRequested)
         {
-            if (job.Status != TransferStatus.Paused)
+            // Only a running attempt becomes Cancelled. Paused stays Paused, and Pending means it was
+            // resumed while this attempt was unwinding (it is queued again): overwriting either would
+            // turn a pause or a resume into a cancel.
+            if (job.Status == TransferStatus.InProgress)
                 job.Status = TransferStatus.Cancelled;
             return false;
         }

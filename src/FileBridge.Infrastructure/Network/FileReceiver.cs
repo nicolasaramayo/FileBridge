@@ -3,12 +3,23 @@ namespace FileBridge.Infrastructure.Network;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 
 /// <summary>What the user is asked to accept before anything is written to disk.</summary>
+/// <param name="PeerName">Name the sender declared in its handshake: not verified, show <paramref name="RemoteEndpoint"/> too.</param>
 public sealed record IncomingFileOffer(Guid TransferId, string FileName, long Size, string? PeerName, string? RemoteEndpoint);
+
+public enum IncomingFileDecision
+{
+    Accepted,
+    Declined,
+
+    /// <summary>Nobody can be asked right now (e.g. the app is not on screen).</summary>
+    Unavailable
+}
 
 public sealed class FileReceivedEventArgs : EventArgs
 {
@@ -47,6 +58,7 @@ public sealed class ReceiveFailedEventArgs : EventArgs
 public sealed class FileReceiver
 {
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan DisconnectPollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly char[] ForbiddenFileNameChars = "\\/:*?\"<>|".ToCharArray();
     private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -59,6 +71,8 @@ public sealed class FileReceiver
     private readonly ILogger? _logger;
     private readonly ConcurrentDictionary<TcpClient, Session> _sessions = new();
     private readonly object _pathLock = new();
+    private readonly SemaphoreSlim _approvalGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, DateTime> _cooldownUntil = new();
 
     public event EventHandler<FileReceivedEventArgs>? FileReceived;
     public event EventHandler<ReceiveProgressEventArgs>? Progress;
@@ -67,9 +81,10 @@ public sealed class FileReceiver
     /// <summary>
     /// Decides whether an incoming file is accepted (the app asks the user). If it is null, every
     /// file is declined: since the server listens on the whole LAN, accepting silently would let any
-    /// device on the same Wi-Fi drop files on this one.
+    /// device on the same Wi-Fi drop files on this one. Only one offer is asked at a time; the token
+    /// is cancelled on timeout or when the sender disconnects, so the prompt should close then.
     /// </summary>
-    public Func<IncomingFileOffer, CancellationToken, Task<bool>>? ApproveIncoming { get; set; }
+    public Func<IncomingFileOffer, CancellationToken, Task<IncomingFileDecision>>? ApproveIncoming { get; set; }
 
     public string ReceivedFilesDirectory => _options.ReceivedFilesDirectory;
 
@@ -91,7 +106,7 @@ public sealed class FileReceiver
 
         var safeName = SanitizeFileName(fileName);
         var remoteEndpoint = connection.Client?.RemoteEndPoint?.ToString();
-        await EnsureApprovedAsync(new IncomingFileOffer(transferId, safeName, size, peerName, remoteEndpoint), ct);
+        await EnsureApprovedAsync(connection, new IncomingFileOffer(transferId, safeName, size, peerName, remoteEndpoint), ct);
 
         string finalPath, partPath;
         FileStream stream;
@@ -117,39 +132,114 @@ public sealed class FileReceiver
         _logger?.LogInformation("Receiving {File} ({Size} bytes) from {Peer} into {Path}", safeName, size, peerName ?? remoteEndpoint, partPath);
     }
 
-    private async Task EnsureApprovedAsync(IncomingFileOffer offer, CancellationToken ct)
+    private async Task EnsureApprovedAsync(TcpClient connection, IncomingFileOffer offer, CancellationToken ct)
     {
         var approve = ApproveIncoming;
         if (approve is null)
             throw new ProtocolException(ProtocolErrorCodes.Forbidden, "this device is not accepting files");
 
-        bool accepted;
-        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        var remoteIp = (connection.Client?.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+        if (_cooldownUntil.TryGetValue(remoteIp, out var until) && DateTime.UtcNow < until)
+            throw new ProtocolException(ProtocolErrorCodes.Forbidden, "declined a moment ago; try again in a few seconds");
+
+        // One question at a time: an offer that arrives while the user is deciding waits briefly and is
+        // then refused (otherwise any host on the LAN could stack prompts just by opening connections).
+        if (!await _approvalGate.WaitAsync(_options.BusyWaitTimeout, ct))
+            throw new ProtocolException(ProtocolErrorCodes.Forbidden, "the receiving device is already asking about another file; try again in a moment");
+
+        IncomingFileDecision decision;
+        var senderGone = new Flag();
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        try
         {
-            timeout.CancelAfter(_options.IncomingApprovalTimeout);
+            waiting.CancelAfter(_options.IncomingApprovalTimeout);
+            // The connection's read loop is paused while we wait, so watch the socket ourselves:
+            // if the sender gives up, cancel the prompt instead of leaving it open for the full timeout.
+            var watcher = WatchForDisconnectAsync(connection, () => { senderGone.Value = true; TryCancel(waiting); }, waiting.Token);
             try
             {
                 // WaitAsync: the timeout applies even if the approver ignores the token.
-                accepted = await approve(offer, timeout.Token).WaitAsync(timeout.Token);
+                decision = await approve(offer, waiting.Token).WaitAsync(waiting.Token);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
+                if (senderGone.Value)
+                    throw new ProtocolException(ProtocolErrorCodes.BadRequest, "the sender disconnected before the file was accepted");
+
                 _logger?.LogInformation("Nobody answered for {File} from {Peer}", offer.FileName, offer.PeerName ?? offer.RemoteEndpoint);
+                StartCooldown(remoteIp);
                 throw new ProtocolException(ProtocolErrorCodes.Forbidden,
                     $"nobody accepted the file within {_options.IncomingApprovalTimeout.TotalSeconds:0} s");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger?.LogWarning(ex, "The approval prompt failed; declining {File}", offer.FileName);
-                accepted = false;
+                decision = IncomingFileDecision.Declined;
+            }
+            finally
+            {
+                TryCancel(waiting); // stops the watcher
+                await watcher;      // never throws
             }
         }
-
-        if (!accepted)
+        finally
         {
-            _logger?.LogInformation("Declined {File} from {Peer}", offer.FileName, offer.PeerName ?? offer.RemoteEndpoint);
-            throw new ProtocolException(ProtocolErrorCodes.Forbidden, "declined on the receiving device");
+            _approvalGate.Release();
         }
+
+        switch (decision)
+        {
+            case IncomingFileDecision.Accepted:
+                return;
+            case IncomingFileDecision.Unavailable:
+                throw new ProtocolException(ProtocolErrorCodes.Forbidden, "FileBridge is not open on the receiving device");
+            default:
+                _logger?.LogInformation("Declined {File} from {Peer}", offer.FileName, offer.PeerName ?? offer.RemoteEndpoint);
+                StartCooldown(remoteIp);
+                throw new ProtocolException(ProtocolErrorCodes.Forbidden, "declined on the receiving device");
+        }
+    }
+
+    private void StartCooldown(string remoteIp)
+    {
+        if (_options.DeclineCooldown > TimeSpan.Zero)
+            _cooldownUntil[remoteIp] = DateTime.UtcNow + _options.DeclineCooldown;
+    }
+
+    private static async Task WatchForDisconnectAsync(TcpClient connection, Action onClosed, CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(DisconnectPollInterval, ct);
+                var socket = connection.Client;
+                // Readable with nothing to read = the peer closed (a well-behaved sender sends nothing until our ACK).
+                if (socket is null || (socket.Poll(0, SelectMode.SelectRead) && socket.Available == 0))
+                {
+                    onClosed();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // answered, timed out or shutting down
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+        {
+            onClosed();
+        }
+    }
+
+    private static void TryCancel(CancellationTokenSource cts)
+    {
+        try { cts.Cancel(); } catch (ObjectDisposedException) { /* already done */ }
+    }
+
+    private sealed class Flag
+    {
+        public volatile bool Value;
     }
 
     public async Task WriteChunkAsync(TcpClient connection, long offset, byte[] data, CancellationToken ct = default)

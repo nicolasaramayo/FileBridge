@@ -26,4 +26,13 @@ public sealed class FileBridgeOptions
 
     /// <summary>How long an incoming file waits for the user to accept it before it is declined.</summary>
     public TimeSpan IncomingApprovalTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>After a decline (or an unanswered prompt), further offers from that IP are refused without asking for this long.</summary>
+    public TimeSpan DeclineCooldown { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Only one offer is asked at a time. Another offer waits this long for the current question to be
+    /// answered before it is refused as "busy" (so two quick, automatically accepted offers do not collide).
+    /// </summary>
+    public TimeSpan BusyWaitTimeout { get; set; } = TimeSpan.FromSeconds(2);
 }

@@ -33,6 +33,7 @@ public static class MauiProgram
 			options.ReceivedFilesDirectory = GetReceivedFilesDirectory();
 		});
 		builder.Services.AddSingleton<INavigationService, NavigationService>();
+		builder.Services.AddSingleton<AppVisibility>(); // App tracks its window; prompt, scanning and network checks read it
 
 		// Run at MauiApp.Build(), in this order. MAUI does not start IHostedService by itself (see HostedServicesStarter);
 		// the prompt is registered first so the server never runs without someone to ask (without it, every file is declined).

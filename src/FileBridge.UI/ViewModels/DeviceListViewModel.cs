@@ -12,7 +12,8 @@ namespace FileBridge.UI.ViewModels;
 /// <summary>
 /// Registered as a singleton: it subscribes once to the singleton registry/discovery (as a transient,
 /// every visit to the page left another live subscriber behind), and the list survives between visits.
-/// Scanning only runs while the page is visible (see DeviceListPage.OnAppearing/OnDisappearing).
+/// Scanning only runs while the page is visible (DeviceListPage.OnAppearing/OnDisappearing) and the app
+/// is on screen: MAUI does not raise OnDisappearing when the app goes to the background.
 /// </summary>
 public partial class DeviceListViewModel : ViewModelBase
 {
@@ -22,7 +23,9 @@ public partial class DeviceListViewModel : ViewModelBase
     private readonly INavigationService _navigationService;
     private readonly IPairingService _pairingService;
     private readonly IDeviceRegistry _registry;
+    private readonly AppVisibility _visibility;
     private CancellationTokenSource? _discoveryCts;
+    private volatile bool _pageVisible;
 
     [ObservableProperty]
     private ObservableCollection<DomainDevice> _devices = new();
@@ -38,12 +41,23 @@ public partial class DeviceListViewModel : ViewModelBase
         DeviceDiscoveryService discoveryService,
         INavigationService navigationService,
         IPairingService pairingService,
-        IDeviceRegistry registry)
+        IDeviceRegistry registry,
+        AppVisibility visibility)
     {
         _discoveryService = discoveryService;
         _navigationService = navigationService;
         _pairingService = pairingService;
         _registry = registry;
+        _visibility = visibility;
+
+        // Background: stop scanning; back on screen with this page open: scan again.
+        _visibility.Changed += (_, onScreen) => MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            if (!onScreen)
+                await StopDiscoveryAsync();
+            else if (_pageVisible)
+                await RefreshAsync();
+        });
 
         // Devices found by the background discovery before this page was opened.
         foreach (var device in _registry.All)
@@ -68,10 +82,20 @@ public partial class DeviceListViewModel : ViewModelBase
     }
 
     /// <summary>Called when the page appears: scan while the user is looking at the list.</summary>
-    public Task StartScanningAsync() => RefreshAsync();
+    public Task StartScanningAsync()
+    {
+        _pageVisible = true;
+        return RefreshAsync();
+    }
 
     /// <summary>Called when the page disappears: stop scanning (battery).</summary>
-    public async Task StopScanningAsync()
+    public Task StopScanningAsync()
+    {
+        _pageVisible = false;
+        return StopDiscoveryAsync();
+    }
+
+    private async Task StopDiscoveryAsync()
     {
         try
         {

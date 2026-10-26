@@ -39,7 +39,8 @@ internal sealed class LoopbackReceiver : IAsyncDisposable
         return new LoopbackReceiver(directory, server, receiver, connections);
     }
 
-    public static readonly Func<IncomingFileOffer, CancellationToken, Task<bool>> AcceptAll = (_, _) => Task.FromResult(true);
+    public static readonly Func<IncomingFileOffer, CancellationToken, Task<IncomingFileDecision>> AcceptAll =
+        (_, _) => Task.FromResult(IncomingFileDecision.Accepted);
 
     public Device AsDevice(string name = "receiver") =>
         new() { Id = Guid.NewGuid(), Name = name, IpAddress = "127.0.0.1", Port = Port };

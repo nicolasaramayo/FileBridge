@@ -1,3 +1,4 @@
+using FileBridge.Domain.Enums;
 using FileBridge.Infrastructure.Network;
 using FileBridge.Tests.Infrastructure.TestSupport;
 
@@ -13,7 +14,7 @@ public class IncomingApprovalTests
     public async Task Declined_SenderGetsTheReason_AndNothingIsWritten()
     {
         await using var receiver = await LoopbackReceiver.StartAsync();
-        receiver.Receiver.ApproveIncoming = (_, _) => Task.FromResult(false);
+        receiver.Receiver.ApproveIncoming = (_, _) => Task.FromResult(IncomingFileDecision.Declined);
         var source = TestFiles.CreateRandomFile(1000, "secret.pdf");
 
         var error = await SendExpectingErrorAsync(receiver, source);
@@ -39,7 +40,7 @@ public class IncomingApprovalTests
     public async Task NobodyAnswers_IsDeclinedAfterTheTimeout()
     {
         await using var receiver = await LoopbackReceiver.StartAsync(configure: o => o.IncomingApprovalTimeout = TimeSpan.FromMilliseconds(300));
-        var neverAnswered = new TaskCompletionSource<bool>(); // also ignores the token
+        var neverAnswered = new TaskCompletionSource<IncomingFileDecision>(); // also ignores the token
         receiver.Receiver.ApproveIncoming = (_, _) => neverAnswered.Task;
 
         var error = await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(10));
@@ -58,7 +59,7 @@ public class IncomingApprovalTests
         {
             offer = o;
             filesWhileAsking = receiver.Files().Length;
-            return Task.FromResult(true);
+            return Task.FromResult(IncomingFileDecision.Accepted);
         };
         var source = TestFiles.CreateRandomFile(4321, "vacaciones.jpg");
 
@@ -81,6 +82,87 @@ public class IncomingApprovalTests
         var error = await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(10));
 
         Assert.AreEqual(ProtocolErrorCodes.Forbidden, error.Code);
+    }
+
+    [TestMethod]
+    public async Task Unavailable_TellsTheSenderTheAppIsNotOpen()
+    {
+        await using var receiver = await LoopbackReceiver.StartAsync();
+        receiver.Receiver.ApproveIncoming = (_, _) => Task.FromResult(IncomingFileDecision.Unavailable);
+
+        var error = await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(10));
+
+        Assert.AreEqual(ProtocolErrorCodes.Forbidden, error.Code);
+        Assert.IsTrue(error.RemoteMessage.Contains("not open"), error.RemoteMessage);
+    }
+
+    [TestMethod]
+    public async Task ASecondOfferWhileTheUserIsDeciding_IsRefusedAsBusy()
+    {
+        await using var receiver = await LoopbackReceiver.StartAsync();
+        var asking = new TaskCompletionSource();
+        var answer = new TaskCompletionSource<IncomingFileDecision>();
+        var asked = 0;
+        receiver.Receiver.ApproveIncoming = (_, _) =>
+        {
+            Interlocked.Increment(ref asked);
+            asking.TrySetResult();
+            return answer.Task;
+        };
+
+        var first = new TcpFileTransport().SendFileAsync(receiver.AsDevice(), TestFiles.CreateRandomFile(100, "first.bin"), Guid.NewGuid());
+        await asking.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(100, "second.bin"));
+        Assert.AreEqual(ProtocolErrorCodes.Forbidden, error.Code);
+        Assert.IsTrue(error.RemoteMessage.Contains("already asking"), error.RemoteMessage);
+        Assert.AreEqual(1, asked, "Only one prompt at a time");
+
+        answer.SetResult(IncomingFileDecision.Accepted);
+        await first;
+        CollectionAssert.AreEqual(new[] { "first.bin" }, receiver.Files().Select(Path.GetFileName).ToArray());
+    }
+
+    [TestMethod]
+    public async Task AfterADecline_TheSameSenderIsRefusedForAWhile_WithoutAskingAgain()
+    {
+        await using var receiver = await LoopbackReceiver.StartAsync();
+        var asked = 0;
+        receiver.Receiver.ApproveIncoming = (_, _) =>
+        {
+            Interlocked.Increment(ref asked);
+            return Task.FromResult(IncomingFileDecision.Declined);
+        };
+
+        await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(10));
+        var again = await SendExpectingErrorAsync(receiver, TestFiles.CreateRandomFile(10));
+
+        Assert.AreEqual(1, asked, "A spamming sender must not get a new prompt right after a decline");
+        Assert.IsTrue(again.RemoteMessage.Contains("a moment ago"), again.RemoteMessage);
+    }
+
+    [TestMethod]
+    public async Task SenderDisconnectsWhileThePromptIsOpen_ThePromptIsCancelled()
+    {
+        await using var receiver = await LoopbackReceiver.StartAsync();
+        var promptCancelled = new TaskCompletionSource();
+        var asking = new TaskCompletionSource();
+        receiver.Receiver.ApproveIncoming = async (_, ct) =>
+        {
+            asking.TrySetResult();
+            try { await Task.Delay(Timeout.Infinite, ct); }
+            catch (OperationCanceledException) { promptCancelled.TrySetResult(); }
+            return IncomingFileDecision.Declined;
+        };
+        using var raw = new RawProtocolClient();
+        await raw.ConnectAsync(receiver.Port);
+        await raw.SendAsync(MessageType.FileRequest, raw.Serializer.BuildFileRequestPayload(Guid.NewGuid(), "x.bin", 10, 0, false, 0));
+        await asking.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await raw.CloseAsync();
+
+        var closed = await Task.WhenAny(promptCancelled.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.AreSame(promptCancelled.Task, closed, "The prompt must close when the sender goes away, not wait for the 60 s timeout");
     }
 
     private static async Task<RemoteProtocolException> SendExpectingErrorAsync(LoopbackReceiver receiver, string source)

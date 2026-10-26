@@ -54,6 +54,9 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
     // f1415d8 replaced this declaration with _advertiser and the project stopped compiling (CS0103).
     // Concurrent because it is touched from the UI thread, the queue loop and progress callbacks.
     private readonly ConcurrentDictionary<string, TransferJob> _activeJobs = new();
+    // Every status transition made here (queue loop, Pause, Resume, Cancel) happens under this lock;
+    // a final event is raised only by whoever removes the job from _activeJobs, so it is raised once.
+    private readonly object _stateLock = new();
     private readonly ZeroconfAdvertiser _advertiser;
     private readonly SemaphoreSlim _advertiseLock = new(1, 1);
     private readonly IDeviceRegistry _devices;
@@ -164,24 +167,38 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         if (!_activeJobs.TryGetValue(jobId, out var job))
             return;
 
-        if (job.Status is TransferStatus.Pending or TransferStatus.InProgress)
+        bool running;
+        lock (_stateLock)
         {
+            if (job.Status is not (TransferStatus.Pending or TransferStatus.InProgress))
+                return;
+            running = job.Status == TransferStatus.InProgress;
             job.Status = TransferStatus.Paused;
-            await _orchestrator.PauseAsync(jobId); // cancels the attempt if it is running
-            _logger.LogInformation("Paused transfer: {JobId}", jobId);
         }
+
+        if (running)
+            await _orchestrator.PauseAsync(jobId); // cancels the attempt; the orchestrator keeps the Paused status
+        _logger.LogInformation("Paused transfer: {JobId}", jobId);
     }
 
     public Task ResumeAsync(string jobId)
     {
-        if (_activeJobs.TryGetValue(jobId, out var job) && job.Status == TransferStatus.Paused)
+        if (!_activeJobs.TryGetValue(jobId, out var job))
+            return Task.CompletedTask;
+
+        lock (_stateLock)
         {
+            if (job.Status != TransferStatus.Paused)
+                return Task.CompletedTask;
             job.Status = TransferStatus.Pending;
             job.TransferredBytes = 0;
             job.ResumeToken = null;
-            if (_queue.Writer.TryWrite(job))
-                _logger.LogInformation("Resumed transfer: {JobId} (restarts from the beginning)", jobId);
         }
+
+        // A paused job may still have an older entry in the queue: the loop skips entries that are not Pending
+        // and only sends once (the second entry finds the job already InProgress/Completed).
+        if (_queue.Writer.TryWrite(job))
+            _logger.LogInformation("Resumed transfer: {JobId} (restarts from the beginning)", jobId);
         return Task.CompletedTask;
     }
 
@@ -190,8 +207,14 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         if (!_activeJobs.TryGetValue(jobId, out var job))
             return;
 
-        var previous = job.Status;
-        job.Status = TransferStatus.Cancelled;
+        TransferStatus previous;
+        lock (_stateLock)
+        {
+            previous = job.Status;
+            if (previous is TransferStatus.Completed or TransferStatus.Failed or TransferStatus.Cancelled)
+                return;
+            job.Status = TransferStatus.Cancelled;
+        }
         _logger.LogInformation("Cancelling transfer: {JobId}", jobId);
 
         switch (previous)
@@ -200,9 +223,9 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
                 await _orchestrator.CancelAsync(jobId); // the queue loop reports it when the attempt unwinds
                 break;
             case TransferStatus.Paused:
-                // Not queued and not running: report it now.
-                _activeJobs.TryRemove(jobId, out _);
-                RaiseFailed(job, FileNameOf(job), "Cancelled");
+                // Not running (it may still have a stale queue entry, which will find it removed): report it now.
+                if (_activeJobs.TryRemove(jobId, out _))
+                    RaiseFailed(job, FileNameOf(job), "Cancelled");
                 break;
             // Pending: still in the queue; the queue loop reports it when it gets there.
         }
@@ -293,21 +316,27 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
         var key = job.Id.ToString();
         var fileName = FileNameOf(job);
 
-        if (job.Status == TransferStatus.Cancelled)
+        bool cancelledWhileQueued;
+        lock (_stateLock)
         {
-            // Cancelled while it was waiting in the queue.
-            _activeJobs.TryRemove(key, out _);
-            RaiseFailed(job, fileName, "Cancelled");
+            cancelledWhileQueued = job.Status == TransferStatus.Cancelled;
+            if (!cancelledWhileQueued)
+            {
+                if (job.Status != TransferStatus.Pending)
+                    return; // paused while queued (kept for ResumeAsync), or a stale entry after a resume
+                job.Status = TransferStatus.InProgress;
+            }
+        }
+
+        if (cancelledWhileQueued)
+        {
+            if (_activeJobs.TryRemove(key, out _))
+                RaiseFailed(job, fileName, "Cancelled");
             return;
         }
 
-        if (job.Status != TransferStatus.Pending)
-            return; // paused while queued (kept for ResumeAsync), or a duplicate entry after a resume
-
         try
         {
-            job.Status = TransferStatus.InProgress;
-
             if (job.Direction == TransferDirection.Send)
             {
                 await _orchestrator.SendFileAsync(job, stoppingToken);
@@ -323,10 +352,15 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
             job.ErrorMessage = ex.Message;
         }
 
-        switch (job.Status)
+        TransferStatus final;
+        lock (_stateLock)
+            final = job.Status;
+
+        switch (final)
         {
             case TransferStatus.Completed:
-                _activeJobs.TryRemove(key, out _);
+                if (!_activeJobs.TryRemove(key, out _))
+                    break;
                 _logger.LogInformation("Transfer completed: {JobId}", job.Id);
                 Raise(OnTransferCompleted, new TransferCompletedEvent(
                     key,
@@ -347,14 +381,14 @@ public class TransferBackgroundService : FileBridgeHostedService, ITransferBackg
                 break;
 
             case TransferStatus.Cancelled:
-                _activeJobs.TryRemove(key, out _);
-                RaiseFailed(job, fileName, "Cancelled");
+                if (_activeJobs.TryRemove(key, out _))
+                    RaiseFailed(job, fileName, "Cancelled");
                 break;
 
             default:
                 // Before, a failed job was dropped without telling anyone.
-                _activeJobs.TryRemove(key, out _);
-                RaiseFailed(job, fileName, job.ErrorMessage ?? "Unknown error");
+                if (_activeJobs.TryRemove(key, out _))
+                    RaiseFailed(job, fileName, job.ErrorMessage ?? "Unknown error");
                 break;
         }
     }
